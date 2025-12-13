@@ -3,21 +3,1085 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Embed Iframe Example</title>
+    <title>Artivo</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;500;700;900&display=swap" rel="stylesheet">
     <style>
+        /* Custom styles for the cinematic, high-end theme */
         body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden; /* Prevent scrolling */
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Very Dark Background */
+            color: #e5e7eb; /* Light Text */
         }
-        iframe {
+        
+        /* Neon Glow Effect for Cards/Containers */
+        .cinematic-card {
+            background-color: #1a1a2e; /* Deep dark purple/blue base */
+            border: 1px solid #4a4e69;
+            /* Stronger initial glow */
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.5), inset 0 0 5px rgba(59, 130, 246, 0.2);
+            animation: neon-pulse 5s infinite alternate; /* Subtle breathing effect */
+            transition: all 0.5s ease;
+        }
+
+        @keyframes neon-pulse {
+            0% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.5), inset 0 0 5px rgba(59, 130, 246, 0.2); }
+            100% { box-shadow: 0 0 25px rgba(59, 130, 246, 0.7), inset 0 0 8px rgba(59, 130, 246, 0.3); }
+        }
+
+        /* Enhanced Button Glow */
+        .generate-button {
+            /* Blue to Purple Gradient for a premium feel */
+            background: linear-gradient(90deg, #3b82f6 0%, #a78bfa 100%);
+            text-shadow: 0 0 8px #ffffff;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 20px rgba(167, 139, 250, 0.5); /* Initial glow */
+        }
+        .generate-button:hover:not(:disabled) {
+            background-color: #60a5fa;
+            box-shadow: 0 0 20px #60a5fa, 0 0 40px #60a5fa; /* Intense glow on hover */
+            transform: translateY(-2px);
+        }
+        .generate-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            animation: none !important;
+            box-shadow: none !important;
+        }
+
+        /* Input and Button styling for high contrast */
+        .prompt-input {
+            background-color: #0d1117; 
+            border-color: #30363d;
+            color: #f3f4f6;
+            transition: border-color 0.3s ease;
+        }
+        .prompt-input:focus {
+             border-color: #3b82f6;
+             box-shadow: 0 0 5px #3b82f6;
+        }
+        .prompt-input::placeholder {
+            color: #6b7280;
+        }
+
+        /* General Progress Bar Styling */
+        .progress-container {
+            height: 12px;
+            background-color: #30363d;
+            border-radius: 6px;
+            overflow: hidden;
+            box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.5);
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #3b82f6 0%, #a78bfa 100%); /* Blue to purple gradient */
+            transition: width 0.3s ease;
+            position: relative;
+        }
+        
+        .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            background: rgba(255, 255, 255, 0.3);
+            /* Moving shine effect */
+            animation: progress-shine 2s infinite linear;
+        }
+
+        @keyframes progress-shine {
+            0% { transform: translateX(-100%); }
+            60% { transform: translateX(100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        /* Timer and ETF Style */
+        .timer-display {
+            font-family: 'Inter', monospace;
+            font-size: 1.25rem;
+            letter-spacing: 2px;
+            text-shadow: 0 0 8px #3b82f6; /* Blue neon timer text */
+        }
+        .etf-value {
+             transition: color 0.5s ease;
+        }
+        
+        /* Loading Spinner */
+        .loading-spinner {
+            border-top-color: #3b82f6;
+            -webkit-animation: spinner 1s linear infinite;
+            animation: spinner 1s linear infinite;
+        }
+
+        /* SPLASH SCREEN STYLES */
+        #loading-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
             width: 100%;
-            height: 100vh; /* Full height of the viewport */
-            border: none; /* Remove border */
+            height: 100%;
+            background-color: #0d1117;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 0.5s ease;
+        }
+        .splash-text {
+            font-size: 2.5rem;
+            font-weight: 900;
+            color: #3b82f6;
+            text-shadow: 0 0 15px #3b82f6;
+            margin-bottom: 2rem;
+            animation: neon-text-pulse 2s infinite alternate;
+        }
+        .splash-bar-container {
+            width: 80%;
+            max-width: 400px;
+        }
+        #splash-progress-bar {
+            background: linear-gradient(90deg, #4f46e5 0%, #3b82f6 100%);
+            transition: width 0.3s ease;
+        }
+        @keyframes neon-text-pulse {
+            0% { opacity: 0.8; }
+            100% { opacity: 1.0; }
+        }
+
+        /* Responsive adjustments */
+        @media (min-width: 640px) {
+            .max-w-lg {
+                max-width: 40rem;
+            }
+        }
+        
+        /* S2S specific styles */
+        #s2s-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        @media (min-width: 640px) {
+            #s2s-controls {
+                flex-direction: row;
+                gap: 2rem;
+            }
+        }
+        .mode-button {
+            background-color: #30363d;
+            border: 1px solid #4a4e69;
+        }
+        .mode-button.active {
+            background-color: #3b82f6;
+            border-color: #a78bfa;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+        #video-container {
+            width: 100%;
+            height: 400px; /* Fixed height for video player on mobile */
+            max-height: 50vh;
+            background-color: #000;
+            position: relative;
+            overflow: hidden;
+        }
+        #video-image-display {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            opacity: 0;
+            transition: opacity 0.5s ease-in-out;
+        }
+        #video-narration-display {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 1rem;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-size: 0.875rem;
+            min-height: 40px;
+        }
+        .video-control-button {
+            transition: all 0.2s;
         }
     </style>
 </head>
-<body>
-    <iframe src="https://7xw6v6uwxhpdc.mocha.app"></iframe>
+<body class="min-h-screen">
+
+    <!-- SPLASH SCREEN -->
+    <div id="loading-screen">
+        <div class="splash-text">
+            WELCOME TO ARTIVO
+        </div>
+        <div class="splash-bar-container">
+            <div class="progress-container">
+                <div id="splash-progress-bar" class="progress-bar" style="width: 0%; animation: none;"></div>
+            </div>
+            <p class="text-xs text-gray-500 mt-2 text-center tracking-widest">
+                INITIALIZING CORE SYSTEMS...
+            </p>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT (Initially Hidden) -->
+    <div id="main-content" class="min-h-screen p-4 sm:p-8 flex items-start justify-center opacity-0 transition duration-500">
+        <div class="w-full max-w-lg mx-auto">
+            
+            <header class="mb-6">
+                <!-- Title and Menu aligned with Flexbox -->
+                <div class="flex justify-between items-center">
+                    <!-- Title Block -->
+                    <div class="flex-grow text-left pr-4 sm:pr-0">
+                        <h1 class="text-3xl sm:text-6xl font-black text-blue-400 tracking-widest leading-tight" style="text-shadow: 0 0 10px #3b82f6;">
+                            ARTIVO <span class="text-white">CONCIERGE</span>
+                        </h1>
+                        <p class="text-xs sm:text-base text-gray-400 mt-1 font-light tracking-wide">
+                            <span id="mode-subtitle">Text to Image Protocol Active.</span>
+                        </p>
+                    </div>
+                    
+                    <!-- MENU STRUCTURE -->
+                    <div class="relative flex-shrink-0">
+                        <button id="menu-button" onclick="toggleMenu()" class="cinematic-card p-2 rounded-lg text-sm font-bold uppercase tracking-widest hover:bg-gray-700 transition duration-300 flex items-center space-x-2 shadow-lg">
+                            <span>Menu</span>
+                            <!-- Hamburger Icon -->
+                            <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
+                        </button>
+
+                        <!-- Dropdown Content -->
+                        <div id="dropdown-menu" class="absolute right-0 mt-2 w-64 cinematic-card rounded-lg overflow-hidden z-20 hidden">
+                            <a href="#" onclick="setMode('T2I'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150 border-b border-gray-700/50">
+                                Create Text to Image
+                            </a>
+                            <a href="#" onclick="setMode('I2I'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150 border-b border-gray-700/50">
+                                Create Image to Image
+                            </a>
+                            <a href="#" onclick="setMode('S2S'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150">
+                                Script to Scene Video
+                            </a>
+                        </div>
+                    </div>
+                    <!-- END MENU STRUCTURE -->
+                </div>
+            </header>
+
+            <!-- Main Input Card (Cinematic Style) -->
+            <div id="generation-card" class="cinematic-card rounded-xl p-6 sm:p-8 mb-8">
+                <!-- Content will be injected here based on mode (T2I/I2I/S2S) -->
+            </div>
+
+            <!-- Output and Status Area -->
+            <div id="output-area" class="w-full">
+                <!-- Image or Video Player will be displayed here -->
+                <div id="output-display" class="mb-6"></div>
+                
+                <!-- Loading and Message area -->
+                <div id="status-message" class="text-center p-4 rounded-lg hidden text-sm font-medium"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- API Configuration ---
+        const API_URL_T2I = "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict";
+        const API_URL_I2I = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent";
+        const API_URL_LLM = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+        const API_URL_TTS = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
+        const apiKey = ""; 
+
+        const NARRATOR_VOICES = {
+            'Kore': 'Kore (Firm, Deep)',
+            'Puck': 'Puck (Upbeat, Enthusiastic)',
+            'Charon': 'Charon (Informative, Clear)',
+            'Leda': 'Leda (Youthful, Expressive)'
+        };
+        
+        // --- DOM Elements ---
+        const modeSubtitle = document.getElementById('mode-subtitle');
+        const generationCard = document.getElementById('generation-card');
+        const outputDisplay = document.getElementById('output-display');
+        const statusMessage = document.getElementById('status-message');
+        const loadingScreen = document.getElementById('loading-screen');
+        const mainContent = document.getElementById('main-content');
+        const splashProgressBar = document.getElementById('splash-progress-bar');
+        const dropdownMenu = document.getElementById('dropdown-menu');
+
+        // --- State variables ---
+        let progressInterval;
+        let startTime;
+        let etfBaselineMs = 0;    
+        let splashInterval;
+        let currentMode = 'T2I';
+        let base64Image = null; // For I2I mode
+        let s2sScriptMode = 'auto'; // 'auto' or 'manual'
+
+        // --- Core Application Logic ---
+
+        /**
+         * Converts 16-bit PCM data to a WAV Blob.
+         * Source: TTS documentation guidelines.
+         */
+        function pcmToWav(pcm16, sampleRate) {
+            const buffer = new ArrayBuffer(44 + pcm16.length * 2);
+            const view = new DataView(buffer);
+            
+            // Write WAV file header
+            // RIFF chunk
+            view.setUint32(0, 0x52494646, false); // "RIFF"
+            view.setUint32(4, 36 + pcm16.length * 2, true); // Chunk size
+            view.setUint32(8, 0x57415645, false); // "WAVE"
+            
+            // FMT sub-chunk
+            view.setUint32(12, 0x666d7420, false); // "fmt "
+            view.setUint32(16, 16, true); // Sub-chunk size (16 for PCM)
+            view.setUint16(20, 1, true); // Audio format (1 for PCM)
+            view.setUint16(22, 1, true); // Number of channels (Mono)
+            view.setUint32(24, sampleRate, true); // Sample rate
+            view.setUint32(28, sampleRate * 2, true); // Byte rate (SampleRate * Channels * BitsPerSample/8)
+            view.setUint16(32, 2, true); // Block align (Channels * BitsPerSample/8)
+            view.setUint16(34, 16, true); // Bits per sample
+            
+            // Data sub-chunk
+            view.setUint32(36, 0x64617461, false); // "data"
+            view.setUint32(40, pcm16.length * 2, true); // Data size
+            
+            // Write PCM data
+            for (let i = 0; i < pcm16.length; i++) {
+                view.setInt16(44 + i * 2, pcm16[i], true);
+            }
+            
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        /**
+         * Decodes Base64 to ArrayBuffer for audio processing.
+         */
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // --- UI Control Functions ---
+
+        /**
+         * Toggles the visibility of the dropdown menu.
+         */
+        function toggleMenu() {
+            dropdownMenu.classList.toggle('hidden');
+        }
+
+        /**
+         * Switches the S2S sub-mode (Auto/Manual script).
+         */
+        function setS2SScriptMode(mode) {
+            s2sScriptMode = mode;
+            const titleInput = document.getElementById('s2s-title-input');
+            const scriptTextarea = document.getElementById('s2s-script-input');
+
+            document.querySelectorAll('.mode-button').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`s2s-${mode}-btn`).classList.add('active');
+
+            if (mode === 'auto') {
+                titleInput.classList.remove('hidden');
+                scriptTextarea.classList.add('hidden');
+            } else {
+                titleInput.classList.add('hidden');
+                scriptTextarea.classList.remove('hidden');
+            }
+        }
+
+
+        /**
+         * Switches the application mode and updates the UI accordingly.
+         */
+        function setMode(mode) {
+            currentMode = mode;
+            outputDisplay.innerHTML = '';
+            statusMessage.classList.add('hidden');
+
+            // Reset I2I state
+            base64Image = null;
+            
+            let cardContent = '';
+            let subtitleText = '';
+            let buttonAction = '';
+
+            if (mode === 'T2I') {
+                subtitleText = 'Text to Image Protocol Active.';
+                buttonAction = 'handleT2I()';
+                cardContent = T2I_UI;
+            } else if (mode === 'I2I') {
+                subtitleText = 'Image to Image Editing Protocol Active.';
+                buttonAction = 'handleI2I()';
+                cardContent = I2I_UI;
+                // Need to re-attach image upload listeners
+                setTimeout(() => {
+                    document.getElementById('image-upload').onchange = previewImage;
+                }, 0);
+            } else if (mode === 'S2S') {
+                subtitleText = 'Script to Scene Video Protocol Active.';
+                buttonAction = 'handleS2S()';
+                cardContent = S2S_UI;
+                // Initialize S2S mode after injection
+                setTimeout(() => {
+                    setS2SScriptMode('auto');
+                }, 0);
+            }
+
+            modeSubtitle.textContent = subtitleText;
+            generationCard.innerHTML = cardContent.replace(/GENERATION_BUTTON_ACTION/g, buttonAction);
+            displayMessage(`MODE SWITCH: ${subtitleText.replace(' Protocol Active.', '')}`, 'info');
+        }
+        
+        // UI Templates
+        const T2I_UI = `
+            <label for="prompt-input" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
+                Input Matrix Query (Text to Image)
+            </label>
+            <textarea id="prompt-input" rows="4" class="w-full p-4 border rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-200 resize-none text-base prompt-input" placeholder="A hyper-detailed 3D render of a mythological phoenix, made of molten gold and sapphire fire, set against a starless black void. Octane render, unreal engine 5."></textarea>
+            
+            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
+                EXECUTE GENERATION PROTOCOL
+            </button>
+        `;
+
+        const I2I_UI = `
+            <!-- I2I Upload Area -->
+            <div id="i2i-upload-area" class="mb-6">
+                <label class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
+                    Source Image Upload
+                </label>
+                <input type="file" id="image-upload" accept="image/png, image/jpeg, image/webp" class="hidden">
+                
+                <div id="upload-box" onclick="document.getElementById('image-upload').click()" 
+                    class="border-2 border-dashed border-gray-600 rounded-lg p-6 text-center cursor-pointer hover:border-blue-500 transition duration-300">
+                    <p class="text-gray-400 font-medium">Click to select an image (JPG, PNG, WebP)</p>
+                    <div id="image-preview" class="mt-4 ${base64Image ? '' : 'hidden'} max-h-64 overflow-hidden rounded-lg">
+                        <img id="uploaded-img" class="w-full h-auto object-contain" src="${base64Image ? 'data:image/png;base64,' + base64Image : ''}">
+                    </div>
+                </div>
+            </div>
+
+            <label for="prompt-input" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
+                Input Matrix Query (Image to Image Editing)
+            </label>
+            <textarea id="prompt-input" rows="4" class="w-full p-4 border rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-200 resize-none text-base prompt-input" placeholder="Change the subject to a neon dragon flying through a cybernetic city. Use a synthwave aesthetic."></textarea>
+            
+            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
+                EXECUTE GENERATION PROTOCOL
+            </button>
+        `;
+
+        const S2S_UI = `
+            <div id="s2s-controls" class="mb-6">
+                <!-- Mode Toggle -->
+                <div class="flex-grow">
+                    <label class="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">Script Input Mode</label>
+                    <div class="flex space-x-2">
+                        <button id="s2s-auto-btn" onclick="setS2SScriptMode('auto')" class="mode-button p-2 flex-1 rounded-lg text-white font-medium transition duration-300">
+                            Auto Script (Title)
+                        </button>
+                        <button id="s2s-manual-btn" onclick="setS2SScriptMode('manual')" class="mode-button p-2 flex-1 rounded-lg text-white font-medium transition duration-300">
+                            Manual Script
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Narrator Select -->
+                <div class="flex-grow">
+                    <label for="s2s-narrator" class="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">Narrator Voice</label>
+                    <select id="s2s-narrator" class="w-full p-2 rounded-lg text-sm prompt-input">
+                        ${Object.entries(NARRATOR_VOICES).map(([key, value]) => 
+                            `<option value="${key}">${value}</option>`
+                        ).join('')}
+                    </select>
+                </div>
+            </div>
+
+            <!-- Input Fields -->
+            <div id="s2s-input-fields">
+                <div id="s2s-title-input">
+                    <label for="s2s-title" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
+                        Story Title (Max 100 characters)
+                    </label>
+                    <input type="text" id="s2s-title" maxlength="100" class="w-full p-4 border rounded-lg text-base prompt-input" placeholder="A short story about a brave AI exploring the cosmos.">
+                </div>
+                
+                <div id="s2s-script-input" class="hidden">
+                    <label for="s2s-script" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
+                        Full Script (Max 5000 characters)
+                    </label>
+                    <textarea id="s2s-script" rows="8" maxlength="5000" class="w-full p-4 border rounded-lg resize-none text-base prompt-input" placeholder="The silent satellite, designation 'Orion', drifted through the nebula..."></textarea>
+                </div>
+            </div>
+
+            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
+                GENERATE SCENE VIDEO
+            </button>
+        `;
+
+        /**
+         * Handles the file upload event, previews the image, and stores the base64 data. (I2I)
+         */
+        function previewImage(event) {
+            const file = event.target.files[0];
+            const uploadedImg = document.getElementById('uploaded-img');
+            const imagePreviewContainer = document.getElementById('image-preview');
+
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    uploadedImg.src = e.target.result;
+                    imagePreviewContainer.classList.remove('hidden');
+                    base64Image = e.target.result.split(',')[1]; 
+                    displayMessage("Source image loaded and encoded successfully.", 'success');
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        /**
+         * Utility function to display messages (error/info).
+         */
+        function displayMessage(message, type = 'info', append = false) {
+            statusMessage.className = 'text-center p-4 rounded-lg mb-4 font-medium text-sm';
+            statusMessage.classList.remove('hidden');
+
+            const content = `${message}`;
+            if (append) {
+                statusMessage.innerHTML += `<p class="mt-1">${content}</p>`;
+            } else {
+                statusMessage.innerHTML = content;
+            }
+
+            switch (type) {
+                case 'success':
+                    statusMessage.classList.add('bg-green-700/30', 'text-green-300');
+                    break;
+                case 'error':
+                    statusMessage.classList.add('bg-red-700/30', 'text-red-300');
+                    break;
+                case 'info':
+                default:
+                    statusMessage.classList.add('bg-blue-700/30', 'text-blue-300');
+                    break;
+            }
+        }
+
+        // --- Loading Simulation and API Helper Functions ---
+
+        /**
+         * Formats elapsed time in minutes:seconds.milliseconds
+         */
+        function formatTime(ms) {
+            if (ms < 0) ms = 0; 
+            const minutes = Math.floor(ms / 60000);
+            const seconds = Math.floor((ms % 60000) / 1000);
+            const deciseconds = Math.floor((ms % 1000) / 100); 
+            return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${deciseconds}`;
+        }
+
+        /**
+         * Starts the image generation progress bar and timer simulation.
+         */
+        function startDynamicLoading(statusText) {
+            const generateButton = document.getElementById('generate-button');
+            const targetDurationMs = 9000 + Math.random() * 6000; 
+            etfBaselineMs = targetDurationMs;
+
+            outputDisplay.innerHTML = '';
+            statusMessage.classList.remove('hidden');
+            statusMessage.className = 'text-center p-6 mb-4 cinematic-card rounded-xl';
+            statusMessage.innerHTML = `
+                <div id="loading-content" class="space-y-4">
+                    <div class="flex justify-center items-center space-x-3">
+                        <div class="loading-spinner w-8 h-8 border-4 border-gray-600 rounded-full"></div>
+                        <p id="loading-status-text" class="text-blue-300 font-semibold text-lg uppercase tracking-wide">
+                            ${statusText || 'Awaiting System Resources...'}
+                        </p>
+                    </div>
+
+                    <div class="flex justify-between text-xs text-gray-400 font-bold uppercase pt-2">
+                        <span>TIME ELAPSED: <span id="time-elapsed" class="text-blue-400 font-extrabold timer-display">00:00.0</span></span>
+                        <span>ETF: <span id="time-estimated" class="text-red-400 font-extrabold timer-display etf-value">--:--</span></span>
+                    </div>
+
+                    <div class="progress-container">
+                        <div id="progress-bar-fill" class="progress-bar"></div>
+                    </div>
+                    <p class="text-xs text-gray-400 font-light">
+                        GENERATION STAGE: Core Model Processing (99%)
+                    </p>
+                </div>
+            `;
+            generateButton.disabled = true;
+            generateButton.textContent = 'EXECUTING (STANDBY)';
+            generateButton.style.animation = 'neon-pulse 1s infinite alternate';
+            dropdownMenu.classList.add('hidden');
+
+            startTime = Date.now();
+            const progressBar = document.getElementById('progress-bar-fill');
+            const timerDisplay = document.getElementById('time-elapsed');
+            const etfDisplay = document.getElementById('time-estimated');
+
+            clearInterval(progressInterval);
+            progressInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                timerDisplay.textContent = formatTime(elapsed);
+                let progress = Math.min(99, (elapsed / etfBaselineMs) * 100);
+                progressBar.style.width = `${progress}%`;
+                let remainingMs = etfBaselineMs - elapsed;
+                if (remainingMs < 0) remainingMs = 0;
+                etfDisplay.textContent = formatTime(remainingMs);
+            }, 100);
+        }
+        
+        /**
+         * Updates the loading status text without resetting the timer.
+         */
+        function updateLoadingStatus(text) {
+            const statusTextElement = document.getElementById('loading-status-text');
+            if (statusTextElement) {
+                statusTextElement.textContent = text;
+            }
+        }
+
+        /**
+         * Hides the loading state and resets intervals.
+         */
+        function hideLoading() {
+            clearInterval(progressInterval);
+            const generateButton = document.getElementById('generate-button');
+            if (generateButton) {
+                generateButton.disabled = false;
+                generateButton.textContent = currentMode === 'S2S' ? 'GENERATE SCENE VIDEO' : 'EXECUTE GENERATION PROTOCOL';
+                generateButton.style.animation = 'none';
+            }
+        }
+
+        /**
+         * Implements fetch with exponential backoff for API calls.
+         */
+        async function fetchWithRetries(url, options, retries = 3, delay = 1000) {
+            try {
+                const response = await fetch(url, options);
+                if (response.status === 429 && retries > 0) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithRetries(url, options, retries - 1, delay * 2);
+                }
+                if (!response.ok) {
+                    const errorBody = await response.json().catch(() => ({}));
+                    throw new Error(`API Error: ${response.status} - ${errorBody.error?.message || response.statusText}`);
+                }
+                return response;
+            } catch (error) {
+                if (retries > 0) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithRetries(url, options, retries - 1, delay * 2);
+                }
+                throw error;
+            }
+        }
+
+        // --- Mode Handlers (T2I, I2I, S2S) ---
+
+        async function handleT2I() {
+            const promptInput = document.getElementById('prompt-input');
+            const prompt = promptInput.value.trim();
+
+            if (!prompt) {
+                displayMessage("ACCESS DENIED: Input Matrix Query is empty. Please provide parameters.", 'error');
+                return;
+            }
+
+            startDynamicLoading("Executing Text to Image...");
+
+            try {
+                const payload = {
+                    instances: [{ prompt: prompt }],
+                    parameters: { sampleCount: 1, outputMimeType: 'image/png', aspectRatio: '1:1' }
+                };
+
+                const response = await fetchWithRetries(`${API_URL_T2I}?key=${apiKey}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                
+                const result = await response.json();
+                const generatedBase64Data = result?.predictions?.[0]?.bytesBase64Encoded;
+
+                if (!generatedBase64Data) {
+                    throw new Error("Generation Failed: Missing image data.");
+                }
+
+                const imageUrl = `data:image/png;base64,${generatedBase64Data}`;
+                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
+
+                outputDisplay.innerHTML = `
+                    <div class="cinematic-card p-2 sm:p-4 rounded-xl">
+                        <img src="${imageUrl}" alt="Generated Image" class="w-full object-cover rounded-lg">
+                        <p class="text-xs text-gray-500 mt-3 text-center truncate italic font-light tracking-wider" title="${prompt}">
+                            OUTPUT CONFIRMED | MODE: T2I | ELAPSED TIME: <span class="text-blue-400 font-medium">${finalTime}</span>
+                        </p>
+                    </div>
+                `;
+                displayMessage("PROTOCOL SUCCESSFUL: Image generation complete. Data integrity verified.", 'success');
+
+            } catch (error) {
+                console.error("Image generation failed:", error);
+                displayMessage(`CRITICAL FAILURE: ${error.message || 'An unknown system fault occurred. Consult the technician.'}`, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function handleI2I() {
+            const promptInput = document.getElementById('prompt-input');
+            const prompt = promptInput.value.trim();
+            const imageUpload = document.getElementById('image-upload');
+
+            if (!prompt) {
+                displayMessage("ACCESS DENIED: Prompt is empty.", 'error');
+                return;
+            }
+            if (!base64Image) {
+                displayMessage("ACCESS DENIED: Source image required.", 'error');
+                return;
+            }
+
+            startDynamicLoading("Executing Image to Image Editing...");
+
+            try {
+                const mimeType = imageUpload.files[0]?.type || "image/jpeg";
+                const payload = {
+                    contents: [{
+                        parts: [
+                            { text: prompt },
+                            { inlineData: { mimeType: mimeType, data: base64Image } }
+                        ]
+                    }],
+                    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+                };
+
+                const response = await fetchWithRetries(`${API_URL_I2I}?key=${apiKey}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                });
+                
+                const result = await response.json();
+                const generatedBase64Data = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+
+                if (!generatedBase64Data) {
+                    throw new Error("Generation Failed: Missing image data.");
+                }
+
+                const imageUrl = `data:image/png;base64,${generatedBase64Data}`;
+                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
+
+                outputDisplay.innerHTML = `
+                    <div class="cinematic-card p-2 sm:p-4 rounded-xl">
+                        <img src="${imageUrl}" alt="Generated Image" class="w-full object-cover rounded-lg">
+                        <p class="text-xs text-gray-500 mt-3 text-center truncate italic font-light tracking-wider" title="${prompt}">
+                            OUTPUT CONFIRMED | MODE: I2I | ELAPSED TIME: <span class="text-blue-400 font-medium">${finalTime}</span>
+                        </p>
+                    </div>
+                `;
+                displayMessage("PROTOCOL SUCCESSFUL: Image generation complete. Note: Using gemini-2.5-flash-image-preview (nano-banana) for I2I editing.", 'success');
+
+            } catch (error) {
+                console.error("Image generation failed:", error);
+                displayMessage(`CRITICAL FAILURE: ${error.message || 'An unknown system fault occurred.'}`, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function handleS2S() {
+            const titleInput = document.getElementById('s2s-title');
+            const scriptTextarea = document.getElementById('s2s-script');
+            const narratorSelect = document.getElementById('s2s-narrator');
+            const selectedVoice = narratorSelect.value;
+            const isManual = s2sScriptMode === 'manual';
+            let scriptContent = isManual ? scriptTextarea.value.trim() : titleInput.value.trim();
+
+            if (!scriptContent) {
+                displayMessage(`ACCESS DENIED: ${isManual ? 'Script' : 'Title'} cannot be empty.`, 'error');
+                return;
+            }
+
+            startDynamicLoading(`STARTING SCRIPT-TO-SCENE... (Mode: ${isManual ? 'Manual' : 'Auto'})`);
+
+            try {
+                let fullScript = scriptContent;
+
+                // --- 1. Auto Script Generation (If needed) ---
+                if (!isManual) {
+                    updateLoadingStatus("Step 1/5: Generating full script from title...");
+                    const scriptPrompt = `Generate a short story script (around 5 scenes) based on this title: "${scriptContent}". The script should be descriptive to allow visual generation.`;
+                    
+                    const scriptResponse = await fetchWithRetries(`${API_URL_LLM}?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ contents: [{ parts: [{ text: scriptPrompt }] }] })
+                    });
+                    const scriptResult = await scriptResponse.json();
+                    fullScript = scriptResult.candidates[0].content.parts[0].text;
+                    displayMessage("Script generated successfully.", 'info', true);
+                }
+
+                // --- 2. Script Segmentation and Prompt Generation ---
+                updateLoadingStatus("Step 2/5: Analyzing script and generating visual prompts...");
+                const scenePrompt = `Break the following story script into a sequence of maximum 5 distinct scenes. For each scene, provide the narration text and a highly detailed, photorealistic visual prompt for an AI image generator. The visual prompt must be under 150 characters and descriptive of the scene's setting and main action.
+
+Script:
+---
+${fullScript}
+---
+`;
+                
+                const scenePayload = {
+                    contents: [{ parts: [{ text: scenePrompt }] }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "ARRAY",
+                            items: {
+                                type: "OBJECT",
+                                properties: {
+                                    "narration": { "type": "STRING", description: "The segment of the story read aloud for this scene." },
+                                    "visual_prompt": { "type": "STRING", description: "The detailed, short visual prompt for the AI image generator (photorealistic, 4k, cinematic lighting)." }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                const sceneResponse = await fetchWithRetries(`${API_URL_LLM}?key=${apiKey}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scenePayload)
+                });
+                const sceneResult = await sceneResponse.json();
+                const sceneDataRaw = sceneResult.candidates[0].content.parts[0].text;
+                const scenes = JSON.parse(sceneDataRaw);
+                displayMessage(`Script broken into ${scenes.length} scenes.`, 'info', true);
+
+
+                // --- 3. TTS Narration Generation (Full Script) ---
+                updateLoadingStatus("Step 3/5: Generating full narration audio...");
+                const ttsPrompt = scenes.map(s => s.narration).join(' '); // TTS API handles timing breaks internally
+                
+                const ttsPayload = {
+                    contents: [{ parts: [{ text: ttsPrompt }] }],
+                    generationConfig: {
+                        responseModalities: ["AUDIO"],
+                        speechConfig: {
+                            voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
+                        }
+                    },
+                    model: "gemini-2.5-flash-preview-tts"
+                };
+
+                const ttsResponse = await fetchWithRetries(`${API_URL_TTS}?key=${apiKey}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ttsPayload)
+                });
+                const ttsResult = await ttsResponse.json();
+                const audioPart = ttsResult?.candidates?.[0]?.content?.parts?.[0];
+
+                if (!audioPart || !audioPart.inlineData || !audioPart.inlineData.data) {
+                    throw new Error("TTS Generation failed.");
+                }
+
+                const pcmData = base64ToArrayBuffer(audioPart.inlineData.data);
+                const pcm16 = new Int16Array(pcmData);
+                // Sample rate is included in the mimeType, which is L16,rate=16000
+                const sampleRate = 16000; 
+                const wavBlob = pcmToWav(pcm16, sampleRate);
+                const audioUrl = URL.createObjectURL(wavBlob);
+                const audio = new Audio(audioUrl);
+                
+                displayMessage("Narration audio generated successfully.", 'info', true);
+
+                // --- 4. Image Generation Loop ---
+                const generatedSceneData = [];
+                for (let i = 0; i < scenes.length; i++) {
+                    const scene = scenes[i];
+                    updateLoadingStatus(`Step 4/5: Generating image for Scene ${i + 1} of ${scenes.length}...`);
+
+                    const imagePayload = {
+                        instances: [{ prompt: scene.visual_prompt }],
+                        parameters: { sampleCount: 1, outputMimeType: 'image/png', aspectRatio: '16:9' }
+                    };
+
+                    const imageResponse = await fetchWithRetries(`${API_URL_T2I}?key=${apiKey}`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload)
+                    });
+                    const imageResult = await imageResponse.json();
+                    const base64Image = imageResult?.predictions?.[0]?.bytesBase64Encoded;
+
+                    if (!base64Image) {
+                        throw new Error(`Image generation failed for scene ${i + 1}.`);
+                    }
+
+                    generatedSceneData.push({
+                        ...scene,
+                        imageUrl: `data:image/png;base64,${base64Image}`
+                    });
+                    displayMessage(`Image for Scene ${i + 1} generated.`, 'info', true);
+                }
+
+                // --- 5. Assemble and Play Video ---
+                updateLoadingStatus("Step 5/5: Assembling visual and audio components...");
+                
+                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
+
+                // Video Player UI
+                outputDisplay.innerHTML = `
+                    <div class="cinematic-card p-4 rounded-xl">
+                        <div id="video-container" class="relative rounded-lg mb-4 shadow-2xl">
+                            <img id="video-image-display" class="rounded-lg">
+                            <div id="video-narration-display" class="rounded-b-lg"></div>
+                            <div class="absolute inset-0 flex items-center justify-center bg-black/50" id="video-overlay">
+                                <h2 class="text-white text-3xl font-black tracking-wider text-center">READY: ${isManual ? 'MANUAL' : 'AUTO'} SCENE</h2>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-center space-x-4">
+                            <button id="play-button" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg video-control-button flex items-center">
+                                <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4.545a1 1 0 001.555.832l3.224-2.276a1 1 0 000-1.652L9.555 7.168z" clip-rule="evenodd"></path></svg>
+                                Play Video
+                            </button>
+                            <a id="audio-download-link" href="${audioUrl}" download="artivo_narration.wav" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg video-control-button flex items-center">
+                                <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 20 20"><path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/></svg>
+                                Download Audio
+                            </a>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-3 text-center italic font-light tracking-wider">
+                            Scene count: ${scenes.length} | Narration Voice: ${NARRATOR_VOICES[selectedVoice]} | Total Time: <span class="text-blue-400 font-medium">${finalTime}</span>
+                        </p>
+                    </div>
+                `;
+
+                // Set up Playback Logic
+                const playButton = document.getElementById('play-button');
+                const videoImageDisplay = document.getElementById('video-image-display');
+                const videoNarrationDisplay = document.getElementById('video-narration-display');
+                const videoOverlay = document.getElementById('video-overlay');
+                let currentSceneIndex = 0;
+                let narrationStartTime = 0;
+
+                playButton.onclick = () => {
+                    playButton.disabled = true;
+                    videoOverlay.classList.add('hidden');
+                    currentSceneIndex = 0;
+                    narrationStartTime = Date.now();
+                    audio.currentTime = 0;
+                    audio.play();
+
+                    videoImageDisplay.onload = function() {
+                        videoImageDisplay.style.opacity = 1;
+                    };
+                    
+                    // Initial image and text setup
+                    videoImageDisplay.src = generatedSceneData[0].imageUrl;
+                    videoNarrationDisplay.textContent = generatedSceneData[0].narration;
+                };
+
+                // The heart of the "video" synchronization: checking the audio time
+                audio.ontimeupdate = function() {
+                    const currentTime = audio.currentTime;
+
+                    if (currentSceneIndex < generatedSceneData.length) {
+                        const nextSceneText = generatedSceneData[currentSceneIndex + 1]?.narration || '';
+                        const timeToNextScene = currentTime + (audio.duration - currentTime) * (1 / (generatedSceneData.length - currentSceneIndex)); // Estimate time based on remaining duration and scenes left (simple, but effective)
+                        
+                        // We need a more reliable way to track when a narration chunk ends.
+                        // Since we have the whole audio, we can only roughly estimate based on word count 
+                        // or just switch after a fixed time slice or user pause.
+                        
+                        // Simple time-based switch: Divide total duration by number of scenes
+                        const sceneDurationEstimate = audio.duration / generatedSceneData.length;
+                        const expectedSwitchTime = (currentSceneIndex + 1) * sceneDurationEstimate;
+
+                        if (currentTime >= expectedSwitchTime && currentSceneIndex < generatedSceneData.length - 1) {
+                            // Switch to the next scene
+                            currentSceneIndex++;
+                            const nextScene = generatedSceneData[currentSceneIndex];
+                            videoImageDisplay.style.opacity = 0; // Start fade out
+                            setTimeout(() => {
+                                videoImageDisplay.src = nextScene.imageUrl;
+                                videoNarrationDisplay.textContent = nextScene.narration;
+                                // Fade in handled by onload
+                            }, 500); // Wait for CSS transition
+                        }
+                    }
+                };
+
+                audio.onended = function() {
+                    playButton.disabled = false;
+                    videoOverlay.classList.remove('hidden');
+                    videoNarrationDisplay.textContent = "Playback Finished.";
+                    videoImageDisplay.style.opacity = 0;
+                };
+
+                displayMessage(`PROTOCOL SUCCESSFUL: Video assembled. Click 'Play Video' to view.`, 'success');
+
+            } catch (error) {
+                console.error("S2S Generation failed:", error);
+                displayMessage(`CRITICAL FAILURE during S2S pipeline: ${error.message || 'An unknown system fault occurred. Consult the technician.'}`, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+
+        // --- Splash Screen & Initialization ---
+
+        /**
+         * Handles the splash screen animation and transition.
+         */
+        function startSplashScreen() {
+            let progress = 0;
+            const duration = 2000; // 2 seconds splash duration
+            const intervalTime = 50; // Update every 50ms
+            const steps = duration / intervalTime;
+            let currentStep = 0;
+
+            splashInterval = setInterval(() => {
+                currentStep++;
+                progress = Math.min(100, (currentStep / steps) * 100);
+                splashProgressBar.style.width = `${progress}%`;
+
+                if (progress >= 100) {
+                    clearInterval(splashInterval);
+                    
+                    loadingScreen.style.opacity = '0';
+                    
+                    setTimeout(() => {
+                        loadingScreen.style.display = 'none';
+                        mainContent.style.opacity = '1';
+                        mainContent.classList.remove('opacity-0');
+                    }, 500);
+                }
+            }, intervalTime);
+        }
+
+        // Start the splash screen and set initial mode when the document content is fully loaded
+        window.onload = function() {
+            startSplashScreen();
+            setMode('T2I');
+        };
+
+    </script>
 </body>
 </html>
+
+
+
