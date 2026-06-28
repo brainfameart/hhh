@@ -1,1087 +1,1177 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Artivo</title>
-    <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;500;700;900&display=swap" rel="stylesheet">
-    <style>
-        /* Custom styles for the cinematic, high-end theme */
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #0d1117; /* Very Dark Background */
-            color: #e5e7eb; /* Light Text */
+import {
+  Application,
+  Container,
+  Graphics,
+  Sprite,
+  Assets,
+  Texture,
+  ColorSource,
+  Text,
+  TextStyle,
+} from 'pixi.js';
+import type { Light2DComponent } from '../ecs/components/Light2DComponent.ts';
+import { Scene }                   from '../ecs/Scene.ts';
+import { TransformComponent }       from '../ecs/components/TransformComponent.ts';
+import { SpriteRendererComponent }  from '../ecs/components/SpriteRendererComponent.ts';
+import { Camera2DComponent }        from '../ecs/components/Camera2DComponent.ts';
+import { Vector2 }                  from '../math/Vector2.ts';
+import type { Entity }              from '../ecs/Entity.ts';
+
+export type GizmoTool = 'pan' | 'translate' | 'rotate' | 'scale';
+
+/** Fullscreen: the canvas fills the entire viewport panel, and the camera
+ *  bounds are the screen edges. Window: a fixed resolution box is rendered
+ *  inside the panel, scaled/letterboxed to fit while preserving aspect
+ *  ratio. Defined here (in runtime) since it's a renderer-level concept;
+ *  the editor imports it from EngineCore rather than the other way round. */
+export type RenderMode = 'fullscreen' | 'window';
+
+interface SpriteRenderObject {
+  entityId:        string;
+  container:       Container;
+  graphic:         Graphics;
+  spriteNode:      Sprite | null;
+  lastColor:       string;
+  lastShape:       string;
+  lastSize:        number;
+  lastTextureUrl:  string | null;
+}
+
+/** Resolved screen-space rect of the active "render box" — fullscreen panel
+ *  bounds in Fullscreen mode, or the scaled/letterboxed fixed-resolution box
+ *  in Window mode. Both editor preview and play-mode masking use this. */
+interface OutputRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** world-units-per-screen-pixel scale that the output box renders at */
+  scale: number;
+}
+
+export class PixiRenderer {
+  private _app:         Application | null = null;
+  /** worldRoot contains grid + sprites + lighting. It is transformed by editor
+   *  pan/zoom or gameplay camera — its (x,y) is the screen-space position of
+   *  world origin (0,0). */
+  private _worldRoot:   Container   | null = null;
+  private _gridLayer:   Graphics    | null = null;
+  private _spriteLayer: Container   | null = null;
+
+  // ── 2D Lighting system ──────────────────────────────────────────────────
+  // Sits above _spriteLayer inside _worldRoot (so it moves/scales with the
+  // world). Uses multiply blend mode: the darkness fill dims unlit areas,
+  // then each light's additive blob brightens pixels under it to reveal the
+  // original sprite colour — exactly how Unity 2D URP lighting works.
+  //
+  // Layer stack inside _worldRoot (back → front):
+  //   _gridLayer      (world-space grid)
+  //   _spriteLayer    (entity sprites)
+  //   _lightLayer     (darkness + light blobs, blendMode: multiply)
+  private _lightLayer:  Graphics    | null = null;
+  /** True when at least one Light2D exists in the scene this frame. */
+  private _lightingActive: boolean = false;
+
+  /** Gizmo layer lives OUTSIDE _worldRoot in screen space.
+   *  We manually convert world→screen for each gizmo so they are never
+   *  distorted by editor zoom, and arrows always stay the same pixel size. */
+  private _gizmoLayer:  Container   | null = null;
+  private _uiLayer:     Container   | null = null;
+
+  /** Drawn behind everything in Window mode: black letterbox/pillarbox bars
+   *  plus a subtle border/shadow around the output box. */
+  private _letterboxLayer: Graphics | null = null;
+  /** Clips rendering to the active output rect during play mode, exactly
+   *  like Void Engine's single sceneContainer mask. */
+  private _outputMask: Graphics | null = null;
+
+  private _renderMap:   Map<string, SpriteRenderObject> = new Map();
+  private _selectedId:  string | null = null;
+  private _isReady:     boolean = false;
+  private _activeTool:  GizmoTool = 'translate';
+  private _isPlayMode:  boolean = false;
+  /** Tracks previous play mode so we can flush the render map on stop. */
+  private _wasPlayMode: boolean = false;
+
+  // ── Render mode / resolution (Camera Gizmo & Window Mode System) ──
+  private _renderMode:  RenderMode = 'fullscreen';
+  private _resW:        number = 800;
+  private _resH:        number = 600;
+
+  // ── Editor viewport pan/zoom — purely a scene-view convenience, never
+  //    written to any Camera2DComponent. No engine lets scrolling the
+  //    editor viewport change what the in-game camera actually sees, so
+  //    this state is local to the renderer and read only outside Play. ──
+  private _editorZoom: number  = 1;
+  private _editorPan:  Vector2 = Vector2.ZERO;
+
+  private _textureCache: Map<string, Texture> = new Map();
+  private _resizeObserver: ResizeObserver | null = null;
+  private _boundsLabelStyle: TextStyle = new TextStyle({
+    fontFamily: 'monospace',
+    fontSize:   11,
+    fill:       0xffffff,
+  });
+
+  // Persistent gizmo Graphics — cleared and redrawn each frame instead of
+  // creating/destroying new objects, which avoids WebGL resource fragmentation.
+  private _gizmoG:               Graphics | null = null;
+  private _cameraGizmoG:         Graphics | null = null;
+  private _cameraBoundsOverlayG: Graphics | null = null;
+  private _cameraBoundsG:        Graphics | null = null;
+  private _cameraBoundsLabel:    Text     | null = null;
+
+  public async init(canvas: HTMLCanvasElement): Promise<void> {
+    const parent = canvas.parentElement ?? canvas;
+    const initialWidth  = parent.clientWidth  || 640;
+    const initialHeight = parent.clientHeight || 400;
+
+    this._app = new Application();
+    await this._app.init({
+      canvas,
+      width:           initialWidth,
+      height:          initialHeight,
+      resizeTo:        parent,
+      backgroundColor: 0x1a1a1a,
+      antialias:       true,
+      resolution:      window.devicePixelRatio || 1,
+      autoDensity:     true,
+      preference:      'webgl',
+    });
+
+    this._app.ticker.stop();
+
+    this._worldRoot      = new Container();
+    this._gridLayer      = new Graphics();
+    this._spriteLayer    = new Container();
+    this._lightLayer     = new Graphics();
+    this._gizmoLayer     = new Container();  // screen-space, NOT child of worldRoot
+    this._uiLayer        = new Container();
+    this._letterboxLayer = new Graphics();
+    this._outputMask     = new Graphics();
+
+    // _worldRoot holds grid + sprites + lighting; it is panned/zoomed by camera.
+    this._worldRoot.addChild(this._gridLayer);
+    this._worldRoot.addChild(this._spriteLayer);
+    this._worldRoot.addChild(this._lightLayer);
+
+    // Light layer uses multiply blend: darkness fill × sprite = dims unlit areas.
+    // Light blobs use erase blend inside the layer to punch through darkness.
+    (this._lightLayer as any).blendMode = 'multiply';
+
+    // Stack order back→front (stage children):
+    //   letterboxLayer (bars in window mode)
+    //   worldRoot      (grid, sprites, lighting all move together)
+    //   gizmoLayer     (screen-space gizmos — arrows, camera bounds)
+    //   uiLayer        (future HUD)
+    this._app.stage.addChild(this._letterboxLayer);
+    this._app.stage.addChild(this._worldRoot);
+    this._app.stage.addChild(this._gizmoLayer);
+    this._app.stage.addChild(this._uiLayer);
+
+    this._app.stage.addChild(this._outputMask);
+    this._worldRoot.mask = null;
+
+    // ── Persistent gizmo layer children ──────────────────────────────────────
+    this._cameraBoundsOverlayG = new Graphics();
+    this._cameraBoundsG        = new Graphics();
+    this._gizmoG               = new Graphics();
+    this._cameraGizmoG         = new Graphics();
+    this._cameraBoundsLabel    = new Text({ text: '', style: this._boundsLabelStyle });
+    this._cameraBoundsLabel.tint = 0x4ade80;
+    this._gizmoLayer.addChild(this._cameraBoundsOverlayG);
+    this._gizmoLayer.addChild(this._cameraBoundsG);
+    this._gizmoLayer.addChild(this._cameraBoundsLabel);
+    this._gizmoLayer.addChild(this._gizmoG);
+    this._gizmoLayer.addChild(this._cameraGizmoG);
+
+    this._resizeObserver = new ResizeObserver(() => this.resize());
+    this._resizeObserver.observe(parent);
+    requestAnimationFrame(() => this.resize());
+
+    this._isReady = true;
+  }
+
+  public destroy(): void {
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    if (this._app) {
+      this._app.destroy(false, { children: true });
+      this._app = null;
+    }
+    this._renderMap.clear();
+    this._textureCache.clear();
+    this._isReady = false;
+  }
+
+  public resize(): void {
+    if (!this._app) return;
+    const parent = this._app.canvas.parentElement;
+    const w = parent?.clientWidth  ?? 800;
+    const h = parent?.clientHeight ?? 600;
+    if (w > 0 && h > 0) {
+      this._app.renderer.resize(w, h);
+    }
+  }
+
+  public setActiveTool(tool: GizmoTool): void { this._activeTool = tool; }
+  public setPlayMode(playing: boolean):  void { this._isPlayMode = playing; }
+
+  public setRenderMode(mode: RenderMode): void { this._renderMode = mode; }
+  public get renderMode(): RenderMode { return this._renderMode; }
+
+  public setResolution(width: number, height: number): void {
+    this._resW = Math.max(1, Math.round(width));
+    this._resH = Math.max(1, Math.round(height));
+  }
+  public get resolution(): { width: number; height: number } {
+    return { width: this._resW, height: this._resH };
+  }
+
+  public panViewport(delta: Vector2): void { this._editorPan = this._editorPan.add(delta); }
+  public zoomViewport(delta: number): void {
+    this._editorZoom = Math.max(0.1, Math.min(10, this._editorZoom + delta));
+  }
+  public resetViewport(): void {
+    this._editorPan  = Vector2.ZERO;
+    this._editorZoom = 1;
+  }
+  public get editorZoom(): number { return this._editorZoom; }
+
+  private _logicalSize(): { w: number; h: number } {
+    if (!this._app) return { w: 0, h: 0 };
+    const res = this._app.renderer.resolution || 1;
+    return {
+      w: this._app.renderer.width  / res,
+      h: this._app.renderer.height / res,
+    };
+  }
+
+  private _computeOutputRect(): OutputRect {
+    const { w, h } = this._logicalSize();
+    if (this._renderMode === 'fullscreen' || !this._isPlayMode) {
+      return { x: 0, y: 0, w, h, scale: 1 };
+    }
+    const scale = Math.min(w / this._resW, h / this._resH);
+    const outW  = this._resW * scale;
+    const outH  = this._resH * scale;
+    return { x: (w - outW) / 2, y: (h - outH) / 2, w: outW, h: outH, scale };
+  }
+
+  public render(scene: Scene, selectedId: string | null): void {
+    if (!this._isReady || !this._app || !this._worldRoot) return;
+
+    this._selectedId = selectedId;
+
+    // Detect play→stop transition: flush sprite render map so all containers
+    // are rebuilt from the restored scene.
+    const justStopped = this._wasPlayMode && !this._isPlayMode;
+    if (justStopped) {
+      for (const ro of this._renderMap.values()) {
+        if (!ro.container.destroyed) {
+          this._spriteLayer?.removeChild(ro.container);
+          ro.container.destroy({ children: true });
         }
-        
-        /* Neon Glow Effect for Cards/Containers */
-        .cinematic-card {
-            background-color: #1a1a2e; /* Deep dark purple/blue base */
-            border: 1px solid #4a4e69;
-            /* Stronger initial glow */
-            box-shadow: 0 0 15px rgba(59, 130, 246, 0.5), inset 0 0 5px rgba(59, 130, 246, 0.2);
-            animation: neon-pulse 5s infinite alternate; /* Subtle breathing effect */
-            transition: all 0.5s ease;
+      }
+      this._renderMap.clear();
+    }
+    this._wasPlayMode = this._isPlayMode;
+
+    const cameraEntities = scene.query('Camera2D');
+    const cameraEntity   = cameraEntities[0] ?? null;
+    const camera         = cameraEntity?.getComponent('Camera2D') ?? null;
+
+    const outputRect = this._computeOutputRect();
+
+    this._applyCamera(camera, cameraEntity?.getComponent('Transform') ?? null, outputRect);
+    this._drawLetterbox(outputRect);
+    this._updateOutputMask(outputRect);
+
+    if (this._app && camera) {
+      this._app.renderer.background.color = camera.clearColor;
+    }
+
+    this._drawGrid();
+    this._syncSprites(scene);
+    this._drawLighting(scene);
+
+    if (!this._isPlayMode) {
+      this._drawGizmos(scene);
+      this._drawCameraBounds(scene);
+    } else {
+      this._gizmoG?.clear();
+      this._cameraGizmoG?.clear();
+      this._cameraBoundsOverlayG?.clear();
+      this._cameraBoundsG?.clear();
+      if (this._cameraBoundsLabel) this._cameraBoundsLabel.text = '';
+    }
+
+    this._app.renderer.render(this._app.stage);
+  }
+
+  private _applyCamera(
+    camera:       Camera2DComponent | null,
+    camTransform: TransformComponent | null,
+    outputRect:   OutputRect,
+  ): void {
+    if (!this._worldRoot || !this._app) return;
+    const cx = outputRect.x + outputRect.w / 2;
+    const cy = outputRect.y + outputRect.h / 2;
+
+    if (this._isPlayMode && camTransform) {
+      const gameplayZoom = camera?.zoom ?? 1;
+      const fitScale = outputRect.scale * gameplayZoom;
+      this._worldRoot.x = cx - camTransform.position.x * fitScale;
+      this._worldRoot.y = cy - camTransform.position.y * fitScale;
+      this._worldRoot.scale.set(fitScale, fitScale);
+    } else {
+      this._worldRoot.x = cx + this._editorPan.x;
+      this._worldRoot.y = cy + this._editorPan.y;
+      this._worldRoot.scale.set(this._editorZoom, this._editorZoom);
+    }
+  }
+
+  private _drawLetterbox(rect: OutputRect): void {
+    if (!this._letterboxLayer || !this._app) return;
+    const g = this._letterboxLayer;
+    g.clear();
+    const showBars = this._isPlayMode && this._renderMode === 'window';
+    if (!showBars) return;
+    const { w, h } = this._logicalSize();
+    g.rect(0, 0, w, h);
+    g.fill({ color: 0x000000, alpha: 1 });
+    g.rect(rect.x - 3, rect.y - 3, rect.w + 6, rect.h + 6);
+    g.stroke({ width: 6, color: 0x000000, alpha: 0.35 });
+    g.rect(rect.x, rect.y, rect.w, rect.h);
+    g.stroke({ width: 1, color: 0x3a72b0, alpha: 0.5 });
+  }
+
+  private _updateOutputMask(rect: OutputRect): void {
+    if (!this._outputMask || !this._worldRoot) return;
+    const needsMask = this._isPlayMode && this._renderMode === 'window';
+    if (!needsMask) {
+      this._worldRoot.mask = null;
+      this._outputMask.clear();
+      this._outputMask.visible = false;
+      return;
+    }
+    this._outputMask.visible = true;
+    this._worldRoot.mask = this._outputMask;
+    this._outputMask.clear();
+    this._outputMask.rect(rect.x, rect.y, rect.w, rect.h);
+    this._outputMask.fill({ color: 0xffffff, alpha: 1 });
+  }
+
+  private _drawGrid(): void {
+    if (!this._gridLayer || !this._app || !this._worldRoot) return;
+    const g     = this._gridLayer;
+    const limit = 4000;
+    const worldScale = this._worldRoot.scale.x || 1;
+    g.clear();
+    for (let x = -limit; x <= limit; x += 50) { g.moveTo(x, -limit); g.lineTo(x, limit); }
+    for (let y = -limit; y <= limit; y += 50) { g.moveTo(-limit, y); g.lineTo(limit, y); }
+    g.stroke({ width: 1 / worldScale, color: 0xffffff, alpha: 0.04 });
+    for (let x = -limit; x <= limit; x += 250) { g.moveTo(x, -limit); g.lineTo(x, limit); }
+    for (let y = -limit; y <= limit; y += 250) { g.moveTo(-limit, y); g.lineTo(limit, y); }
+    g.stroke({ width: 1 / worldScale, color: 0xffffff, alpha: 0.1 });
+    g.moveTo(-limit, 0); g.lineTo(limit, 0);
+    g.moveTo(0, -limit); g.lineTo(0,  limit);
+    g.stroke({ width: 1 / worldScale, color: 0xffffff, alpha: 0.2 });
+  }
+
+  // ── 2D Lighting ──────────────────────────────────────────────────────────
+  //
+  // Implements Unity-style 2D lighting using the classic multiply/erase
+  // technique — no shader plugins required:
+  //
+  //  1. _lightLayer (blendMode:'multiply') covers the entire world-space view.
+  //  2. Fill the layer with the "ambient" colour — if a Global Light exists its
+  //     colour × intensity sets the ambient, otherwise a near-black constant.
+  //  3. For every Point / Spot / Freeform light, draw a radial gradient blob
+  //     using blendMode:'erase' so it punches holes in the darkness layer,
+  //     revealing the original sprite colours beneath at full brightness.
+  //  4. The blob's colour comes from the light's colour tint (erase is
+  //     alpha-based, so we modulate brightness via alpha; for coloured lights
+  //     we draw a separate coloured pass using blendMode:'add').
+  //
+  // The result is that unlit areas are darkened to the ambient colour and lit
+  // areas show sprites at their true colour tinted by the light colour — the
+  // same look Unity 2D URP lights produce out of the box.
+  //
+  // In EDITOR mode the lighting is rendered at editor zoom/pan so you can see
+  // the effect while placing lights without entering play mode.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private _drawLighting(scene: Scene): void {
+    if (!this._lightLayer || !this._worldRoot) return;
+
+    const g = this._lightLayer;
+    g.clear();
+
+    const lightEntities = scene.query('Light2D', 'Transform');
+    if (lightEntities.length === 0) {
+      // No lights — disable the layer entirely so sprites render at full colour.
+      this._lightLayer.visible = false;
+      this._lightingActive = false;
+      return;
+    }
+
+    this._lightLayer.visible = true;
+    this._lightingActive = true;
+
+    const zoom = this._worldRoot.scale.x || 1;
+
+    // ── 1. Resolve global / ambient light ─────────────────────────────────
+    // Global lights contribute as an ambient colour that covers the scene.
+    // If multiple global lights exist we blend them additively (like Unity).
+    let ambientR = 0, ambientG = 0, ambientB = 0;
+    let hasGlobal = false;
+    for (const e of lightEntities) {
+      const light = e.getComponent('Light2D') as Light2DComponent;
+      if (light.lightType !== 'global') continue;
+      const [r, g2, b] = this._hexToRGB01(light.color);
+      const i = Math.max(0, light.intensity);
+      ambientR += r * i;
+      ambientG += g2 * i;
+      ambientB += b * i;
+      hasGlobal = true;
+    }
+    if (hasGlobal) {
+      ambientR = Math.min(ambientR, 1);
+      ambientG = Math.min(ambientG, 1);
+      ambientB = Math.min(ambientB, 1);
+    } else {
+      // Default ambient: very dark grey so local lights are visible.
+      ambientR = 0.05; ambientG = 0.05; ambientB = 0.05;
+    }
+
+    // ── 2. Fill entire scene with the ambient darkness ─────────────────────
+    // We need to cover the whole visible world, so we compute a large rect
+    // in WORLD coordinates (the light layer is a child of worldRoot so
+    // coordinates are in world space).
+    const { w: sw, h: sh } = this._logicalSize();
+    // World-space bounds of the viewport
+    const invZ = 1 / zoom;
+    const wx = -this._worldRoot.x * invZ;
+    const wy = -this._worldRoot.y * invZ;
+    const ww  = sw * invZ;
+    const wh  = sh * invZ;
+    const pad = 200 * invZ; // a little extra to avoid edge bleed
+
+    // Darkness fill: multiply means colour×darkness = dimmed sprite.
+    // Alpha = 1 so the multiply blend has full effect.
+    g.rect(wx - pad, wy - pad, ww + pad * 2, wh + pad * 2);
+    g.fill({
+      color: this._rgb01ToHex(ambientR, ambientG, ambientB),
+      alpha: 1,
+    });
+
+    // ── 3. Draw local lights (point, spot, freeform) ────────────────────
+    // We draw two passes per light to get coloured illumination:
+    //   Pass A (erase): punch a white hole in the darkness proportional to
+    //                    the light's falloff — this reveals the sprite colour.
+    //   Pass B (add):   tint the revealed area with the light's colour,
+    //                    blending additively on top of the sprite.
+    //
+    // This separates the "how bright" (erase) from "what colour" (add) so
+    // coloured lights feel physically intuitive without a real shader.
+
+    for (const e of lightEntities) {
+      const light = e.getComponent('Light2D') as Light2DComponent;
+      if (light.lightType === 'global') continue;
+
+      const tf    = e.getComponent('Transform')!;
+      const wx2   = tf.position.x;  // world-space centre
+      const wy2   = tf.position.y;
+      const [lr, lg, lb] = this._hexToRGB01(light.color);
+      const intensity = Math.max(0, Math.min(light.intensity, 4));
+      // Range is in world units.  Clamp so the gradient doesn't span 10k px.
+      const range = Math.max(10, light.range);
+
+      switch (light.lightType) {
+        case 'point':
+          this._drawPointLight(g, wx2, wy2, range, lr, lg, lb, intensity, light.falloff);
+          break;
+        case 'spot':
+          this._drawSpotLight(g, wx2, wy2, range, lr, lg, lb, intensity, light.falloff,
+                               light.innerAngle, light.outerAngle, tf.rotationRadians);
+          break;
+        case 'freeform':
+          // Freeform is a large soft area light (no directional falloff).
+          this._drawPointLight(g, wx2, wy2, range * 1.5, lr, lg, lb, intensity * 0.7, light.falloff * 0.5);
+          break;
+      }
+    }
+  }
+
+  /**
+   * Draw a radial point light into the light layer using the erase+add
+   * technique.  Both passes use concentric circles with stepped alpha to
+   * approximate a smooth radial gradient without a fragment shader.
+   *
+   * We draw STEPS concentric rings from outer edge to centre, each with
+   * increasing alpha, so the "erase" pass removes more darkness near the
+   * centre (brighter) and fades toward the range boundary.
+   */
+  private _drawPointLight(
+    g: Graphics,
+    wx: number, wy: number,
+    range: number,
+    lr: number, lg: number, lb: number,
+    intensity: number,
+    falloff: number,
+  ): void {
+    const STEPS = 14;
+    // Erase pass — punch the white hole in the darkness
+    for (let i = STEPS; i >= 1; i--) {
+      const t     = i / STEPS;          // 1 at outer edge → fraction near centre
+      const r     = range * t;
+      // Smooth falloff: 1 at centre, 0 at edge.  Power = max(0.5, falloff).
+      const brightness = Math.pow(1 - t, Math.max(0.5, falloff)) * intensity;
+      const alpha = Math.min(brightness, 1);
+      if (alpha <= 0.001) continue;
+
+      g.moveTo(wx + r, wy);
+      g.arc(wx, wy, r, 0, Math.PI * 2);
+      (g as any).fill({ color: 0xffffff, alpha, blendMode: 'erase' });
+    }
+
+    // Colour add pass — tint the illuminated area with the light colour
+    if (lr > 0.02 || lg > 0.02 || lb > 0.02) {
+      for (let i = STEPS; i >= 1; i--) {
+        const t     = i / STEPS;
+        const r     = range * t;
+        const brightness = Math.pow(1 - t, Math.max(0.5, falloff)) * intensity * 0.45;
+        const alpha = Math.min(brightness, 0.55);
+        if (alpha <= 0.001) continue;
+
+        g.moveTo(wx + r, wy);
+        g.arc(wx, wy, r, 0, Math.PI * 2);
+        (g as any).fill({
+          color: this._rgb01ToHex(lr, lg, lb),
+          alpha,
+          blendMode: 'add',
+        });
+      }
+    }
+  }
+
+  /**
+   * Draw a cone spot light.  The erase+add gradient is clipped to the cone
+   * defined by innerAngle/outerAngle around the entity's forward direction.
+   *
+   * We approximate the cone as a filled arc-wedge, applying the same
+   * concentric brightness rings as _drawPointLight but masked to the cone.
+   */
+  private _drawSpotLight(
+    g: Graphics,
+    wx: number, wy: number,
+    range: number,
+    lr: number, lg: number, lb: number,
+    intensity: number,
+    falloff: number,
+    innerAngle: number,
+    outerAngle: number,
+    rotRad: number,
+  ): void {
+    const STEPS = 14;
+    // Outer cone half-angle in radians (outerAngle is total degrees).
+    const halfOuter = (outerAngle * Math.PI) / 360;
+    // Inner cone is brighter (no falloff inside it).
+    const halfInner = (innerAngle * Math.PI) / 360;
+    // In Unity, spot lights point along the entity's local +Y (up) axis by default.
+    // We replicate that: base direction = -PI/2 (up in screen space) + entity rotation.
+    const dir = rotRad - Math.PI / 2;
+
+    for (let i = STEPS; i >= 1; i--) {
+      const t = i / STEPS;
+      const r = range * t;
+      // Radial falloff (same as point light)
+      const radialBrightness = Math.pow(1 - t, Math.max(0.5, falloff));
+      // Angular falloff: full brightness inside inner cone, fades to 0 at outer.
+      // Draw STEPS angular slices so the edge feathers like Unity's spot.
+      const ANG_STEPS = 8;
+      for (let ai = 0; ai < ANG_STEPS; ai++) {
+        const angFrac = (ai + 0.5) / ANG_STEPS; // 0→1 across the outer half-angle
+        const angle   = dir - halfOuter + halfOuter * 2 * angFrac;
+        // Angular attenuation: 1 inside inner, lerp to 0 at outer edge
+        const angAtten = halfInner >= halfOuter
+          ? 1
+          : Math.max(0, 1 - (Math.abs(angle - dir) - halfInner) / (halfOuter - halfInner + 0.001));
+        const brightness = radialBrightness * angAtten * intensity;
+        const alpha = Math.min(brightness, 1);
+        if (alpha <= 0.001) continue;
+
+        const sliceAngle = (halfOuter * 2) / ANG_STEPS;
+        const a0 = angle - sliceAngle / 2;
+        const a1 = angle + sliceAngle / 2;
+
+        // Draw a pie-slice wedge
+        g.moveTo(wx, wy);
+        g.arc(wx, wy, r, a0, a1);
+        g.closePath();
+        (g as any).fill({ color: 0xffffff, alpha, blendMode: 'erase' });
+      }
+    }
+
+    // Colour add pass
+    if (lr > 0.02 || lg > 0.02 || lb > 0.02) {
+      for (let i = STEPS; i >= 1; i--) {
+        const t = i / STEPS;
+        const r = range * t;
+        const radialBrightness = Math.pow(1 - t, Math.max(0.5, falloff));
+        const brightness = radialBrightness * intensity * 0.45;
+        const alpha = Math.min(brightness, 0.55);
+        if (alpha <= 0.001) continue;
+
+        // Draw whole outer-cone wedge for the colour tint
+        const a0 = dir - halfOuter;
+        const a1 = dir + halfOuter;
+        g.moveTo(wx, wy);
+        g.arc(wx, wy, r, a0, a1);
+        g.closePath();
+        (g as any).fill({
+          color: this._rgb01ToHex(lr, lg, lb),
+          alpha,
+          blendMode: 'add',
+        });
+      }
+    }
+  }
+
+  // ── Sprite sync ──────────────────────────────────────────────────────────
+
+  private _syncSprites(scene: Scene): void {
+    if (!this._spriteLayer) return;
+
+    const entities = scene.query('Transform', 'SpriteRenderer');
+    const liveIds  = new Set<string>();
+
+    for (const entity of entities) {
+      liveIds.add(entity.id);
+      const tf = entity.getComponent('Transform')!;
+      const sr = entity.getComponent('SpriteRenderer')!;
+
+      let ro = this._renderMap.get(entity.id);
+      if (!ro) {
+        ro = this._createRenderObject(entity.id);
+        this._spriteLayer.addChild(ro.container);
+        this._renderMap.set(entity.id, ro);
+      }
+
+      ro.container.x        = tf.position.x;
+      ro.container.y        = tf.position.y;
+      ro.container.rotation = tf.rotationRadians;
+      ro.container.scale.set(tf.scale.x, tf.scale.y);
+
+      const currentUrl     = sr.textureUrl ?? null;
+      const textureChanged = ro.lastTextureUrl !== currentUrl;
+
+      if (textureChanged) {
+        this._applyTexture(ro, sr);
+        ro.lastTextureUrl = currentUrl;
+        ro.lastColor = sr.color;
+        ro.lastShape = sr.shape;
+        ro.lastSize  = sr.size;
+      } else if (!currentUrl) {
+        this._drawShape(ro.graphic, sr);
+        ro.lastColor = sr.color;
+        ro.lastShape = sr.shape;
+        ro.lastSize  = sr.size;
+      } else {
+        if (ro.spriteNode && ro.lastSize !== sr.size) {
+          ro.spriteNode.width  = sr.size;
+          ro.spriteNode.height = sr.size;
+          ro.lastSize = sr.size;
         }
-
-        @keyframes neon-pulse {
-            0% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.5), inset 0 0 5px rgba(59, 130, 246, 0.2); }
-            100% { box-shadow: 0 0 25px rgba(59, 130, 246, 0.7), inset 0 0 8px rgba(59, 130, 246, 0.3); }
-        }
-
-        /* Enhanced Button Glow */
-        .generate-button {
-            /* Blue to Purple Gradient for a premium feel */
-            background: linear-gradient(90deg, #3b82f6 0%, #a78bfa 100%);
-            text-shadow: 0 0 8px #ffffff;
-            box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 20px rgba(167, 139, 250, 0.5); /* Initial glow */
-        }
-        .generate-button:hover:not(:disabled) {
-            background-color: #60a5fa;
-            box-shadow: 0 0 20px #60a5fa, 0 0 40px #60a5fa; /* Intense glow on hover */
-            transform: translateY(-2px);
-        }
-        .generate-button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            animation: none !important;
-            box-shadow: none !important;
-        }
-
-        /* Input and Button styling for high contrast */
-        .prompt-input {
-            background-color: #0d1117; 
-            border-color: #30363d;
-            color: #f3f4f6;
-            transition: border-color 0.3s ease;
-        }
-        .prompt-input:focus {
-             border-color: #3b82f6;
-             box-shadow: 0 0 5px #3b82f6;
-        }
-        .prompt-input::placeholder {
-            color: #6b7280;
-        }
-
-        /* General Progress Bar Styling */
-        .progress-container {
-            height: 12px;
-            background-color: #30363d;
-            border-radius: 6px;
-            overflow: hidden;
-            box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.5);
-        }
-
-        .progress-bar {
-            height: 100%;
-            width: 0%;
-            background: linear-gradient(90deg, #3b82f6 0%, #a78bfa 100%); /* Blue to purple gradient */
-            transition: width 0.3s ease;
-            position: relative;
-        }
-        
-        .progress-bar::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            background: rgba(255, 255, 255, 0.3);
-            /* Moving shine effect */
-            animation: progress-shine 2s infinite linear;
-        }
-
-        @keyframes progress-shine {
-            0% { transform: translateX(-100%); }
-            60% { transform: translateX(100%); }
-            100% { transform: translateX(100%); }
-        }
-
-        /* Timer and ETF Style */
-        .timer-display {
-            font-family: 'Inter', monospace;
-            font-size: 1.25rem;
-            letter-spacing: 2px;
-            text-shadow: 0 0 8px #3b82f6; /* Blue neon timer text */
-        }
-        .etf-value {
-             transition: color 0.5s ease;
-        }
-        
-        /* Loading Spinner */
-        .loading-spinner {
-            border-top-color: #3b82f6;
-            -webkit-animation: spinner 1s linear infinite;
-            animation: spinner 1s linear infinite;
-        }
-
-        /* SPLASH SCREEN STYLES */
-        #loading-screen {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #0d1117;
-            z-index: 1000;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            transition: opacity 0.5s ease;
-        }
-        .splash-text {
-            font-size: 2.5rem;
-            font-weight: 900;
-            color: #3b82f6;
-            text-shadow: 0 0 15px #3b82f6;
-            margin-bottom: 2rem;
-            animation: neon-text-pulse 2s infinite alternate;
-        }
-        .splash-bar-container {
-            width: 80%;
-            max-width: 400px;
-        }
-        #splash-progress-bar {
-            background: linear-gradient(90deg, #4f46e5 0%, #3b82f6 100%);
-            transition: width 0.3s ease;
-        }
-        @keyframes neon-text-pulse {
-            0% { opacity: 0.8; }
-            100% { opacity: 1.0; }
-        }
-
-        /* Responsive adjustments */
-        @media (min-width: 640px) {
-            .max-w-lg {
-                max-width: 40rem;
-            }
-        }
-        
-        /* S2S specific styles */
-        #s2s-controls {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-        }
-        @media (min-width: 640px) {
-            #s2s-controls {
-                flex-direction: row;
-                gap: 2rem;
-            }
-        }
-        .mode-button {
-            background-color: #30363d;
-            border: 1px solid #4a4e69;
-        }
-        .mode-button.active {
-            background-color: #3b82f6;
-            border-color: #a78bfa;
-            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
-        }
-        #video-container {
-            width: 100%;
-            height: 400px; /* Fixed height for video player on mobile */
-            max-height: 50vh;
-            background-color: #000;
-            position: relative;
-            overflow: hidden;
-        }
-        #video-image-display {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            opacity: 0;
-            transition: opacity 0.5s ease-in-out;
-        }
-        #video-narration-display {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            padding: 1rem;
-            background-color: rgba(0, 0, 0, 0.7);
-            color: white;
-            font-size: 0.875rem;
-            min-height: 40px;
-        }
-        .video-control-button {
-            transition: all 0.2s;
-        }
-    </style>
-</head>
-<body class="min-h-screen">
-
-    <!-- SPLASH SCREEN -->
-    <div id="loading-screen">
-        <div class="splash-text">
-            WELCOME TO ARTIVO
-        </div>
-        <div class="splash-bar-container">
-            <div class="progress-container">
-                <div id="splash-progress-bar" class="progress-bar" style="width: 0%; animation: none;"></div>
-            </div>
-            <p class="text-xs text-gray-500 mt-2 text-center tracking-widest">
-                INITIALIZING CORE SYSTEMS...
-            </p>
-        </div>
-    </div>
-
-    <!-- MAIN CONTENT (Initially Hidden) -->
-    <div id="main-content" class="min-h-screen p-4 sm:p-8 flex items-start justify-center opacity-0 transition duration-500">
-        <div class="w-full max-w-lg mx-auto">
-            
-            <header class="mb-6">
-                <!-- Title and Menu aligned with Flexbox -->
-                <div class="flex justify-between items-center">
-                    <!-- Title Block -->
-                    <div class="flex-grow text-left pr-4 sm:pr-0">
-                        <h1 class="text-3xl sm:text-6xl font-black text-blue-400 tracking-widest leading-tight" style="text-shadow: 0 0 10px #3b82f6;">
-                            ARTIVO <span class="text-white">CONCIERGE</span>
-                        </h1>
-                        <p class="text-xs sm:text-base text-gray-400 mt-1 font-light tracking-wide">
-                            <span id="mode-subtitle">Text to Image Protocol Active.</span>
-                        </p>
-                    </div>
-                    
-                    <!-- MENU STRUCTURE -->
-                    <div class="relative flex-shrink-0">
-                        <button id="menu-button" onclick="toggleMenu()" class="cinematic-card p-2 rounded-lg text-sm font-bold uppercase tracking-widest hover:bg-gray-700 transition duration-300 flex items-center space-x-2 shadow-lg">
-                            <span>Menu</span>
-                            <!-- Hamburger Icon -->
-                            <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
-                        </button>
-
-                        <!-- Dropdown Content -->
-                        <div id="dropdown-menu" class="absolute right-0 mt-2 w-64 cinematic-card rounded-lg overflow-hidden z-20 hidden">
-                            <a href="#" onclick="setMode('T2I'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150 border-b border-gray-700/50">
-                                Create Text to Image
-                            </a>
-                            <a href="#" onclick="setMode('I2I'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150 border-b border-gray-700/50">
-                                Create Image to Image
-                            </a>
-                            <a href="#" onclick="setMode('S2S'); toggleMenu(); return false;" class="block px-4 py-3 text-sm text-blue-300 font-medium hover:bg-blue-900/50 transition duration-150">
-                                Script to Scene Video
-                            </a>
-                        </div>
-                    </div>
-                    <!-- END MENU STRUCTURE -->
-                </div>
-            </header>
-
-            <!-- Main Input Card (Cinematic Style) -->
-            <div id="generation-card" class="cinematic-card rounded-xl p-6 sm:p-8 mb-8">
-                <!-- Content will be injected here based on mode (T2I/I2I/S2S) -->
-            </div>
-
-            <!-- Output and Status Area -->
-            <div id="output-area" class="w-full">
-                <!-- Image or Video Player will be displayed here -->
-                <div id="output-display" class="mb-6"></div>
-                
-                <!-- Loading and Message area -->
-                <div id="status-message" class="text-center p-4 rounded-lg hidden text-sm font-medium"></div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // --- API Configuration ---
-        const API_URL_T2I = "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict";
-        const API_URL_I2I = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent";
-        const API_URL_LLM = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
-        const API_URL_TTS = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
-        const apiKey = ""; 
-
-        const NARRATOR_VOICES = {
-            'Kore': 'Kore (Firm, Deep)',
-            'Puck': 'Puck (Upbeat, Enthusiastic)',
-            'Charon': 'Charon (Informative, Clear)',
-            'Leda': 'Leda (Youthful, Expressive)'
-        };
-        
-        // --- DOM Elements ---
-        const modeSubtitle = document.getElementById('mode-subtitle');
-        const generationCard = document.getElementById('generation-card');
-        const outputDisplay = document.getElementById('output-display');
-        const statusMessage = document.getElementById('status-message');
-        const loadingScreen = document.getElementById('loading-screen');
-        const mainContent = document.getElementById('main-content');
-        const splashProgressBar = document.getElementById('splash-progress-bar');
-        const dropdownMenu = document.getElementById('dropdown-menu');
-
-        // --- State variables ---
-        let progressInterval;
-        let startTime;
-        let etfBaselineMs = 0;    
-        let splashInterval;
-        let currentMode = 'T2I';
-        let base64Image = null; // For I2I mode
-        let s2sScriptMode = 'auto'; // 'auto' or 'manual'
-
-        // --- Core Application Logic ---
-
-        /**
-         * Converts 16-bit PCM data to a WAV Blob.
-         * Source: TTS documentation guidelines.
-         */
-        function pcmToWav(pcm16, sampleRate) {
-            const buffer = new ArrayBuffer(44 + pcm16.length * 2);
-            const view = new DataView(buffer);
-            
-            // Write WAV file header
-            // RIFF chunk
-            view.setUint32(0, 0x52494646, false); // "RIFF"
-            view.setUint32(4, 36 + pcm16.length * 2, true); // Chunk size
-            view.setUint32(8, 0x57415645, false); // "WAVE"
-            
-            // FMT sub-chunk
-            view.setUint32(12, 0x666d7420, false); // "fmt "
-            view.setUint32(16, 16, true); // Sub-chunk size (16 for PCM)
-            view.setUint16(20, 1, true); // Audio format (1 for PCM)
-            view.setUint16(22, 1, true); // Number of channels (Mono)
-            view.setUint32(24, sampleRate, true); // Sample rate
-            view.setUint32(28, sampleRate * 2, true); // Byte rate (SampleRate * Channels * BitsPerSample/8)
-            view.setUint16(32, 2, true); // Block align (Channels * BitsPerSample/8)
-            view.setUint16(34, 16, true); // Bits per sample
-            
-            // Data sub-chunk
-            view.setUint32(36, 0x64617461, false); // "data"
-            view.setUint32(40, pcm16.length * 2, true); // Data size
-            
-            // Write PCM data
-            for (let i = 0; i < pcm16.length; i++) {
-                view.setInt16(44 + i * 2, pcm16[i], true);
-            }
-            
-            return new Blob([view], { type: 'audio/wav' });
-        }
-
-        /**
-         * Decodes Base64 to ArrayBuffer for audio processing.
-         */
-        function base64ToArrayBuffer(base64) {
-            const binaryString = atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            return bytes.buffer;
-        }
-
-        // --- UI Control Functions ---
-
-        /**
-         * Toggles the visibility of the dropdown menu.
-         */
-        function toggleMenu() {
-            dropdownMenu.classList.toggle('hidden');
-        }
-
-        /**
-         * Switches the S2S sub-mode (Auto/Manual script).
-         */
-        function setS2SScriptMode(mode) {
-            s2sScriptMode = mode;
-            const titleInput = document.getElementById('s2s-title-input');
-            const scriptTextarea = document.getElementById('s2s-script-input');
-
-            document.querySelectorAll('.mode-button').forEach(btn => btn.classList.remove('active'));
-            document.getElementById(`s2s-${mode}-btn`).classList.add('active');
-
-            if (mode === 'auto') {
-                titleInput.classList.remove('hidden');
-                scriptTextarea.classList.add('hidden');
-            } else {
-                titleInput.classList.add('hidden');
-                scriptTextarea.classList.remove('hidden');
-            }
-        }
-
-
-        /**
-         * Switches the application mode and updates the UI accordingly.
-         */
-        function setMode(mode) {
-            currentMode = mode;
-            outputDisplay.innerHTML = '';
-            statusMessage.classList.add('hidden');
-
-            // Reset I2I state
-            base64Image = null;
-            
-            let cardContent = '';
-            let subtitleText = '';
-            let buttonAction = '';
-
-            if (mode === 'T2I') {
-                subtitleText = 'Text to Image Protocol Active.';
-                buttonAction = 'handleT2I()';
-                cardContent = T2I_UI;
-            } else if (mode === 'I2I') {
-                subtitleText = 'Image to Image Editing Protocol Active.';
-                buttonAction = 'handleI2I()';
-                cardContent = I2I_UI;
-                // Need to re-attach image upload listeners
-                setTimeout(() => {
-                    document.getElementById('image-upload').onchange = previewImage;
-                }, 0);
-            } else if (mode === 'S2S') {
-                subtitleText = 'Script to Scene Video Protocol Active.';
-                buttonAction = 'handleS2S()';
-                cardContent = S2S_UI;
-                // Initialize S2S mode after injection
-                setTimeout(() => {
-                    setS2SScriptMode('auto');
-                }, 0);
-            }
-
-            modeSubtitle.textContent = subtitleText;
-            generationCard.innerHTML = cardContent.replace(/GENERATION_BUTTON_ACTION/g, buttonAction);
-            displayMessage(`MODE SWITCH: ${subtitleText.replace(' Protocol Active.', '')}`, 'info');
-        }
-        
-        // UI Templates
-        const T2I_UI = `
-            <label for="prompt-input" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
-                Input Matrix Query (Text to Image)
-            </label>
-            <textarea id="prompt-input" rows="4" class="w-full p-4 border rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-200 resize-none text-base prompt-input" placeholder="A hyper-detailed 3D render of a mythological phoenix, made of molten gold and sapphire fire, set against a starless black void. Octane render, unreal engine 5."></textarea>
-            
-            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
-                EXECUTE GENERATION PROTOCOL
-            </button>
-        `;
-
-        const I2I_UI = `
-            <!-- I2I Upload Area -->
-            <div id="i2i-upload-area" class="mb-6">
-                <label class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
-                    Source Image Upload
-                </label>
-                <input type="file" id="image-upload" accept="image/png, image/jpeg, image/webp" class="hidden">
-                
-                <div id="upload-box" onclick="document.getElementById('image-upload').click()" 
-                    class="border-2 border-dashed border-gray-600 rounded-lg p-6 text-center cursor-pointer hover:border-blue-500 transition duration-300">
-                    <p class="text-gray-400 font-medium">Click to select an image (JPG, PNG, WebP)</p>
-                    <div id="image-preview" class="mt-4 ${base64Image ? '' : 'hidden'} max-h-64 overflow-hidden rounded-lg">
-                        <img id="uploaded-img" class="w-full h-auto object-contain" src="${base64Image ? 'data:image/png;base64,' + base64Image : ''}">
-                    </div>
-                </div>
-            </div>
-
-            <label for="prompt-input" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
-                Input Matrix Query (Image to Image Editing)
-            </label>
-            <textarea id="prompt-input" rows="4" class="w-full p-4 border rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-200 resize-none text-base prompt-input" placeholder="Change the subject to a neon dragon flying through a cybernetic city. Use a synthwave aesthetic."></textarea>
-            
-            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
-                EXECUTE GENERATION PROTOCOL
-            </button>
-        `;
-
-        const S2S_UI = `
-            <div id="s2s-controls" class="mb-6">
-                <!-- Mode Toggle -->
-                <div class="flex-grow">
-                    <label class="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">Script Input Mode</label>
-                    <div class="flex space-x-2">
-                        <button id="s2s-auto-btn" onclick="setS2SScriptMode('auto')" class="mode-button p-2 flex-1 rounded-lg text-white font-medium transition duration-300">
-                            Auto Script (Title)
-                        </button>
-                        <button id="s2s-manual-btn" onclick="setS2SScriptMode('manual')" class="mode-button p-2 flex-1 rounded-lg text-white font-medium transition duration-300">
-                            Manual Script
-                        </button>
-                    </div>
-                </div>
-                
-                <!-- Narrator Select -->
-                <div class="flex-grow">
-                    <label for="s2s-narrator" class="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-widest">Narrator Voice</label>
-                    <select id="s2s-narrator" class="w-full p-2 rounded-lg text-sm prompt-input">
-                        ${Object.entries(NARRATOR_VOICES).map(([key, value]) => 
-                            `<option value="${key}">${value}</option>`
-                        ).join('')}
-                    </select>
-                </div>
-            </div>
-
-            <!-- Input Fields -->
-            <div id="s2s-input-fields">
-                <div id="s2s-title-input">
-                    <label for="s2s-title" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
-                        Story Title (Max 100 characters)
-                    </label>
-                    <input type="text" id="s2s-title" maxlength="100" class="w-full p-4 border rounded-lg text-base prompt-input" placeholder="A short story about a brave AI exploring the cosmos.">
-                </div>
-                
-                <div id="s2s-script-input" class="hidden">
-                    <label for="s2s-script" class="block text-sm font-bold text-blue-400 mb-3 uppercase tracking-widest">
-                        Full Script (Max 5000 characters)
-                    </label>
-                    <textarea id="s2s-script" rows="8" maxlength="5000" class="w-full p-4 border rounded-lg resize-none text-base prompt-input" placeholder="The silent satellite, designation 'Orion', drifted through the nebula..."></textarea>
-                </div>
-            </div>
-
-            <button id="generate-button" onclick="GENERATION_BUTTON_ACTION" class="mt-6 w-full py-3.5 px-4 rounded-lg text-white font-black transition duration-300 focus:outline-none focus:ring-4 focus:ring-blue-500/50 uppercase tracking-widest generate-button">
-                GENERATE SCENE VIDEO
-            </button>
-        `;
-
-        /**
-         * Handles the file upload event, previews the image, and stores the base64 data. (I2I)
-         */
-        function previewImage(event) {
-            const file = event.target.files[0];
-            const uploadedImg = document.getElementById('uploaded-img');
-            const imagePreviewContainer = document.getElementById('image-preview');
-
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    uploadedImg.src = e.target.result;
-                    imagePreviewContainer.classList.remove('hidden');
-                    base64Image = e.target.result.split(',')[1]; 
-                    displayMessage("Source image loaded and encoded successfully.", 'success');
-                };
-                reader.readAsDataURL(file);
-            }
-        }
-
-        /**
-         * Utility function to display messages (error/info).
-         */
-        function displayMessage(message, type = 'info', append = false) {
-            statusMessage.className = 'text-center p-4 rounded-lg mb-4 font-medium text-sm';
-            statusMessage.classList.remove('hidden');
-
-            const content = `${message}`;
-            if (append) {
-                statusMessage.innerHTML += `<p class="mt-1">${content}</p>`;
-            } else {
-                statusMessage.innerHTML = content;
-            }
-
-            switch (type) {
-                case 'success':
-                    statusMessage.classList.add('bg-green-700/30', 'text-green-300');
-                    break;
-                case 'error':
-                    statusMessage.classList.add('bg-red-700/30', 'text-red-300');
-                    break;
-                case 'info':
-                default:
-                    statusMessage.classList.add('bg-blue-700/30', 'text-blue-300');
-                    break;
-            }
-        }
-
-        // --- Loading Simulation and API Helper Functions ---
-
-        /**
-         * Formats elapsed time in minutes:seconds.milliseconds
-         */
-        function formatTime(ms) {
-            if (ms < 0) ms = 0; 
-            const minutes = Math.floor(ms / 60000);
-            const seconds = Math.floor((ms % 60000) / 1000);
-            const deciseconds = Math.floor((ms % 1000) / 100); 
-            return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${deciseconds}`;
-        }
-
-        /**
-         * Starts the image generation progress bar and timer simulation.
-         */
-        function startDynamicLoading(statusText) {
-            const generateButton = document.getElementById('generate-button');
-            const targetDurationMs = 9000 + Math.random() * 6000; 
-            etfBaselineMs = targetDurationMs;
-
-            outputDisplay.innerHTML = '';
-            statusMessage.classList.remove('hidden');
-            statusMessage.className = 'text-center p-6 mb-4 cinematic-card rounded-xl';
-            statusMessage.innerHTML = `
-                <div id="loading-content" class="space-y-4">
-                    <div class="flex justify-center items-center space-x-3">
-                        <div class="loading-spinner w-8 h-8 border-4 border-gray-600 rounded-full"></div>
-                        <p id="loading-status-text" class="text-blue-300 font-semibold text-lg uppercase tracking-wide">
-                            ${statusText || 'Awaiting System Resources...'}
-                        </p>
-                    </div>
-
-                    <div class="flex justify-between text-xs text-gray-400 font-bold uppercase pt-2">
-                        <span>TIME ELAPSED: <span id="time-elapsed" class="text-blue-400 font-extrabold timer-display">00:00.0</span></span>
-                        <span>ETF: <span id="time-estimated" class="text-red-400 font-extrabold timer-display etf-value">--:--</span></span>
-                    </div>
-
-                    <div class="progress-container">
-                        <div id="progress-bar-fill" class="progress-bar"></div>
-                    </div>
-                    <p class="text-xs text-gray-400 font-light">
-                        GENERATION STAGE: Core Model Processing (99%)
-                    </p>
-                </div>
-            `;
-            generateButton.disabled = true;
-            generateButton.textContent = 'EXECUTING (STANDBY)';
-            generateButton.style.animation = 'neon-pulse 1s infinite alternate';
-            dropdownMenu.classList.add('hidden');
-
-            startTime = Date.now();
-            const progressBar = document.getElementById('progress-bar-fill');
-            const timerDisplay = document.getElementById('time-elapsed');
-            const etfDisplay = document.getElementById('time-estimated');
-
-            clearInterval(progressInterval);
-            progressInterval = setInterval(() => {
-                const elapsed = Date.now() - startTime;
-                timerDisplay.textContent = formatTime(elapsed);
-                let progress = Math.min(99, (elapsed / etfBaselineMs) * 100);
-                progressBar.style.width = `${progress}%`;
-                let remainingMs = etfBaselineMs - elapsed;
-                if (remainingMs < 0) remainingMs = 0;
-                etfDisplay.textContent = formatTime(remainingMs);
-            }, 100);
-        }
-        
-        /**
-         * Updates the loading status text without resetting the timer.
-         */
-        function updateLoadingStatus(text) {
-            const statusTextElement = document.getElementById('loading-status-text');
-            if (statusTextElement) {
-                statusTextElement.textContent = text;
-            }
-        }
-
-        /**
-         * Hides the loading state and resets intervals.
-         */
-        function hideLoading() {
-            clearInterval(progressInterval);
-            const generateButton = document.getElementById('generate-button');
-            if (generateButton) {
-                generateButton.disabled = false;
-                generateButton.textContent = currentMode === 'S2S' ? 'GENERATE SCENE VIDEO' : 'EXECUTE GENERATION PROTOCOL';
-                generateButton.style.animation = 'none';
-            }
-        }
-
-        /**
-         * Implements fetch with exponential backoff for API calls.
-         */
-        async function fetchWithRetries(url, options, retries = 3, delay = 1000) {
-            try {
-                const response = await fetch(url, options);
-                if (response.status === 429 && retries > 0) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    return fetchWithRetries(url, options, retries - 1, delay * 2);
-                }
-                if (!response.ok) {
-                    const errorBody = await response.json().catch(() => ({}));
-                    throw new Error(`API Error: ${response.status} - ${errorBody.error?.message || response.statusText}`);
-                }
-                return response;
-            } catch (error) {
-                if (retries > 0) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    return fetchWithRetries(url, options, retries - 1, delay * 2);
-                }
-                throw error;
-            }
-        }
-
-        // --- Mode Handlers (T2I, I2I, S2S) ---
-
-        async function handleT2I() {
-            const promptInput = document.getElementById('prompt-input');
-            const prompt = promptInput.value.trim();
-
-            if (!prompt) {
-                displayMessage("ACCESS DENIED: Input Matrix Query is empty. Please provide parameters.", 'error');
-                return;
-            }
-
-            startDynamicLoading("Executing Text to Image...");
-
-            try {
-                const payload = {
-                    instances: [{ prompt: prompt }],
-                    parameters: { sampleCount: 1, outputMimeType: 'image/png', aspectRatio: '1:1' }
-                };
-
-                const response = await fetchWithRetries(`${API_URL_T2I}?key=${apiKey}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-                });
-                
-                const result = await response.json();
-                const generatedBase64Data = result?.predictions?.[0]?.bytesBase64Encoded;
-
-                if (!generatedBase64Data) {
-                    throw new Error("Generation Failed: Missing image data.");
-                }
-
-                const imageUrl = `data:image/png;base64,${generatedBase64Data}`;
-                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
-
-                outputDisplay.innerHTML = `
-                    <div class="cinematic-card p-2 sm:p-4 rounded-xl">
-                        <img src="${imageUrl}" alt="Generated Image" class="w-full object-cover rounded-lg">
-                        <p class="text-xs text-gray-500 mt-3 text-center truncate italic font-light tracking-wider" title="${prompt}">
-                            OUTPUT CONFIRMED | MODE: T2I | ELAPSED TIME: <span class="text-blue-400 font-medium">${finalTime}</span>
-                        </p>
-                    </div>
-                `;
-                displayMessage("PROTOCOL SUCCESSFUL: Image generation complete. Data integrity verified.", 'success');
-
-            } catch (error) {
-                console.error("Image generation failed:", error);
-                displayMessage(`CRITICAL FAILURE: ${error.message || 'An unknown system fault occurred. Consult the technician.'}`, 'error');
-            } finally {
-                hideLoading();
-            }
-        }
-
-        async function handleI2I() {
-            const promptInput = document.getElementById('prompt-input');
-            const prompt = promptInput.value.trim();
-            const imageUpload = document.getElementById('image-upload');
-
-            if (!prompt) {
-                displayMessage("ACCESS DENIED: Prompt is empty.", 'error');
-                return;
-            }
-            if (!base64Image) {
-                displayMessage("ACCESS DENIED: Source image required.", 'error');
-                return;
-            }
-
-            startDynamicLoading("Executing Image to Image Editing...");
-
-            try {
-                const mimeType = imageUpload.files[0]?.type || "image/jpeg";
-                const payload = {
-                    contents: [{
-                        parts: [
-                            { text: prompt },
-                            { inlineData: { mimeType: mimeType, data: base64Image } }
-                        ]
-                    }],
-                    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-                };
-
-                const response = await fetchWithRetries(`${API_URL_I2I}?key=${apiKey}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-                });
-                
-                const result = await response.json();
-                const generatedBase64Data = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-
-                if (!generatedBase64Data) {
-                    throw new Error("Generation Failed: Missing image data.");
-                }
-
-                const imageUrl = `data:image/png;base64,${generatedBase64Data}`;
-                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
-
-                outputDisplay.innerHTML = `
-                    <div class="cinematic-card p-2 sm:p-4 rounded-xl">
-                        <img src="${imageUrl}" alt="Generated Image" class="w-full object-cover rounded-lg">
-                        <p class="text-xs text-gray-500 mt-3 text-center truncate italic font-light tracking-wider" title="${prompt}">
-                            OUTPUT CONFIRMED | MODE: I2I | ELAPSED TIME: <span class="text-blue-400 font-medium">${finalTime}</span>
-                        </p>
-                    </div>
-                `;
-                displayMessage("PROTOCOL SUCCESSFUL: Image generation complete. Note: Using gemini-2.5-flash-image-preview (nano-banana) for I2I editing.", 'success');
-
-            } catch (error) {
-                console.error("Image generation failed:", error);
-                displayMessage(`CRITICAL FAILURE: ${error.message || 'An unknown system fault occurred.'}`, 'error');
-            } finally {
-                hideLoading();
-            }
-        }
-
-        async function handleS2S() {
-            const titleInput = document.getElementById('s2s-title');
-            const scriptTextarea = document.getElementById('s2s-script');
-            const narratorSelect = document.getElementById('s2s-narrator');
-            const selectedVoice = narratorSelect.value;
-            const isManual = s2sScriptMode === 'manual';
-            let scriptContent = isManual ? scriptTextarea.value.trim() : titleInput.value.trim();
-
-            if (!scriptContent) {
-                displayMessage(`ACCESS DENIED: ${isManual ? 'Script' : 'Title'} cannot be empty.`, 'error');
-                return;
-            }
-
-            startDynamicLoading(`STARTING SCRIPT-TO-SCENE... (Mode: ${isManual ? 'Manual' : 'Auto'})`);
-
-            try {
-                let fullScript = scriptContent;
-
-                // --- 1. Auto Script Generation (If needed) ---
-                if (!isManual) {
-                    updateLoadingStatus("Step 1/5: Generating full script from title...");
-                    const scriptPrompt = `Generate a short story script (around 5 scenes) based on this title: "${scriptContent}". The script should be descriptive to allow visual generation.`;
-                    
-                    const scriptResponse = await fetchWithRetries(`${API_URL_LLM}?key=${apiKey}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ contents: [{ parts: [{ text: scriptPrompt }] }] })
-                    });
-                    const scriptResult = await scriptResponse.json();
-                    fullScript = scriptResult.candidates[0].content.parts[0].text;
-                    displayMessage("Script generated successfully.", 'info', true);
-                }
-
-                // --- 2. Script Segmentation and Prompt Generation ---
-                updateLoadingStatus("Step 2/5: Analyzing script and generating visual prompts...");
-                const scenePrompt = `Break the following story script into a sequence of maximum 5 distinct scenes. For each scene, provide the narration text and a highly detailed, photorealistic visual prompt for an AI image generator. The visual prompt must be under 150 characters and descriptive of the scene's setting and main action.
-
-Script:
----
-${fullScript}
----
-`;
-                
-                const scenePayload = {
-                    contents: [{ parts: [{ text: scenePrompt }] }],
-                    generationConfig: {
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: "ARRAY",
-                            items: {
-                                type: "OBJECT",
-                                properties: {
-                                    "narration": { "type": "STRING", description: "The segment of the story read aloud for this scene." },
-                                    "visual_prompt": { "type": "STRING", description: "The detailed, short visual prompt for the AI image generator (photorealistic, 4k, cinematic lighting)." }
-                                }
-                            }
-                        }
-                    }
-                };
-
-                const sceneResponse = await fetchWithRetries(`${API_URL_LLM}?key=${apiKey}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scenePayload)
-                });
-                const sceneResult = await sceneResponse.json();
-                const sceneDataRaw = sceneResult.candidates[0].content.parts[0].text;
-                const scenes = JSON.parse(sceneDataRaw);
-                displayMessage(`Script broken into ${scenes.length} scenes.`, 'info', true);
-
-
-                // --- 3. TTS Narration Generation (Full Script) ---
-                updateLoadingStatus("Step 3/5: Generating full narration audio...");
-                const ttsPrompt = scenes.map(s => s.narration).join(' '); // TTS API handles timing breaks internally
-                
-                const ttsPayload = {
-                    contents: [{ parts: [{ text: ttsPrompt }] }],
-                    generationConfig: {
-                        responseModalities: ["AUDIO"],
-                        speechConfig: {
-                            voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
-                        }
-                    },
-                    model: "gemini-2.5-flash-preview-tts"
-                };
-
-                const ttsResponse = await fetchWithRetries(`${API_URL_TTS}?key=${apiKey}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ttsPayload)
-                });
-                const ttsResult = await ttsResponse.json();
-                const audioPart = ttsResult?.candidates?.[0]?.content?.parts?.[0];
-
-                if (!audioPart || !audioPart.inlineData || !audioPart.inlineData.data) {
-                    throw new Error("TTS Generation failed.");
-                }
-
-                const pcmData = base64ToArrayBuffer(audioPart.inlineData.data);
-                const pcm16 = new Int16Array(pcmData);
-                // Sample rate is included in the mimeType, which is L16,rate=16000
-                const sampleRate = 16000; 
-                const wavBlob = pcmToWav(pcm16, sampleRate);
-                const audioUrl = URL.createObjectURL(wavBlob);
-                const audio = new Audio(audioUrl);
-                
-                displayMessage("Narration audio generated successfully.", 'info', true);
-
-                // --- 4. Image Generation Loop ---
-                const generatedSceneData = [];
-                for (let i = 0; i < scenes.length; i++) {
-                    const scene = scenes[i];
-                    updateLoadingStatus(`Step 4/5: Generating image for Scene ${i + 1} of ${scenes.length}...`);
-
-                    const imagePayload = {
-                        instances: [{ prompt: scene.visual_prompt }],
-                        parameters: { sampleCount: 1, outputMimeType: 'image/png', aspectRatio: '16:9' }
-                    };
-
-                    const imageResponse = await fetchWithRetries(`${API_URL_T2I}?key=${apiKey}`, {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload)
-                    });
-                    const imageResult = await imageResponse.json();
-                    const base64Image = imageResult?.predictions?.[0]?.bytesBase64Encoded;
-
-                    if (!base64Image) {
-                        throw new Error(`Image generation failed for scene ${i + 1}.`);
-                    }
-
-                    generatedSceneData.push({
-                        ...scene,
-                        imageUrl: `data:image/png;base64,${base64Image}`
-                    });
-                    displayMessage(`Image for Scene ${i + 1} generated.`, 'info', true);
-                }
-
-                // --- 5. Assemble and Play Video ---
-                updateLoadingStatus("Step 5/5: Assembling visual and audio components...");
-                
-                const finalTime = document.getElementById('time-elapsed')?.textContent || 'N/A';
-
-                // Video Player UI
-                outputDisplay.innerHTML = `
-                    <div class="cinematic-card p-4 rounded-xl">
-                        <div id="video-container" class="relative rounded-lg mb-4 shadow-2xl">
-                            <img id="video-image-display" class="rounded-lg">
-                            <div id="video-narration-display" class="rounded-b-lg"></div>
-                            <div class="absolute inset-0 flex items-center justify-center bg-black/50" id="video-overlay">
-                                <h2 class="text-white text-3xl font-black tracking-wider text-center">READY: ${isManual ? 'MANUAL' : 'AUTO'} SCENE</h2>
-                            </div>
-                        </div>
-
-                        <div class="flex justify-center space-x-4">
-                            <button id="play-button" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg video-control-button flex items-center">
-                                <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4.545a1 1 0 001.555.832l3.224-2.276a1 1 0 000-1.652L9.555 7.168z" clip-rule="evenodd"></path></svg>
-                                Play Video
-                            </button>
-                            <a id="audio-download-link" href="${audioUrl}" download="artivo_narration.wav" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg video-control-button flex items-center">
-                                <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 20 20"><path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/></svg>
-                                Download Audio
-                            </a>
-                        </div>
-                        <p class="text-xs text-gray-500 mt-3 text-center italic font-light tracking-wider">
-                            Scene count: ${scenes.length} | Narration Voice: ${NARRATOR_VOICES[selectedVoice]} | Total Time: <span class="text-blue-400 font-medium">${finalTime}</span>
-                        </p>
-                    </div>
-                `;
-
-                // Set up Playback Logic
-                const playButton = document.getElementById('play-button');
-                const videoImageDisplay = document.getElementById('video-image-display');
-                const videoNarrationDisplay = document.getElementById('video-narration-display');
-                const videoOverlay = document.getElementById('video-overlay');
-                let currentSceneIndex = 0;
-                let narrationStartTime = 0;
-
-                playButton.onclick = () => {
-                    playButton.disabled = true;
-                    videoOverlay.classList.add('hidden');
-                    currentSceneIndex = 0;
-                    narrationStartTime = Date.now();
-                    audio.currentTime = 0;
-                    audio.play();
-
-                    videoImageDisplay.onload = function() {
-                        videoImageDisplay.style.opacity = 1;
-                    };
-                    
-                    // Initial image and text setup
-                    videoImageDisplay.src = generatedSceneData[0].imageUrl;
-                    videoNarrationDisplay.textContent = generatedSceneData[0].narration;
-                };
-
-                // The heart of the "video" synchronization: checking the audio time
-                audio.ontimeupdate = function() {
-                    const currentTime = audio.currentTime;
-
-                    if (currentSceneIndex < generatedSceneData.length) {
-                        const nextSceneText = generatedSceneData[currentSceneIndex + 1]?.narration || '';
-                        const timeToNextScene = currentTime + (audio.duration - currentTime) * (1 / (generatedSceneData.length - currentSceneIndex)); // Estimate time based on remaining duration and scenes left (simple, but effective)
-                        
-                        // We need a more reliable way to track when a narration chunk ends.
-                        // Since we have the whole audio, we can only roughly estimate based on word count 
-                        // or just switch after a fixed time slice or user pause.
-                        
-                        // Simple time-based switch: Divide total duration by number of scenes
-                        const sceneDurationEstimate = audio.duration / generatedSceneData.length;
-                        const expectedSwitchTime = (currentSceneIndex + 1) * sceneDurationEstimate;
-
-                        if (currentTime >= expectedSwitchTime && currentSceneIndex < generatedSceneData.length - 1) {
-                            // Switch to the next scene
-                            currentSceneIndex++;
-                            const nextScene = generatedSceneData[currentSceneIndex];
-                            videoImageDisplay.style.opacity = 0; // Start fade out
-                            setTimeout(() => {
-                                videoImageDisplay.src = nextScene.imageUrl;
-                                videoNarrationDisplay.textContent = nextScene.narration;
-                                // Fade in handled by onload
-                            }, 500); // Wait for CSS transition
-                        }
-                    }
-                };
-
-                audio.onended = function() {
-                    playButton.disabled = false;
-                    videoOverlay.classList.remove('hidden');
-                    videoNarrationDisplay.textContent = "Playback Finished.";
-                    videoImageDisplay.style.opacity = 0;
-                };
-
-                displayMessage(`PROTOCOL SUCCESSFUL: Video assembled. Click 'Play Video' to view.`, 'success');
-
-            } catch (error) {
-                console.error("S2S Generation failed:", error);
-                displayMessage(`CRITICAL FAILURE during S2S pipeline: ${error.message || 'An unknown system fault occurred. Consult the technician.'}`, 'error');
-            } finally {
-                hideLoading();
-            }
+      }
+    }
+
+    for (const [id, ro] of this._renderMap) {
+      if (!liveIds.has(id)) {
+        this._spriteLayer.removeChild(ro.container);
+        ro.container.destroy({ children: true });
+        this._renderMap.delete(id);
+      }
+    }
+  }
+
+  private _applyTexture(ro: SpriteRenderObject, sr: SpriteRendererComponent): void {
+    if (sr.textureUrl) {
+      ro.graphic.clear();
+      ro.graphic.visible = false;
+      const existingSprite = ro.spriteNode;
+      if (existingSprite) { existingSprite.destroy(); ro.spriteNode = null; }
+
+      const cached = this._textureCache.get(sr.textureUrl);
+      if (cached) {
+        const s = new Sprite(cached);
+        s.anchor.set(0.5);
+        s.width  = sr.size;
+        s.height = sr.size;
+        ro.container.addChild(s);
+        ro.spriteNode = s;
+      } else {
+        Assets.load(sr.textureUrl).then((tex: Texture) => {
+          this._textureCache.set(sr.textureUrl!, tex);
+          if (ro.lastTextureUrl === sr.textureUrl && ro.spriteNode === null && !ro.container.destroyed) {
+            const s = new Sprite(tex);
+            s.anchor.set(0.5);
+            s.width  = sr.size;
+            s.height = sr.size;
+            ro.container.addChild(s);
+            ro.spriteNode = s;
+          }
+        }).catch(() => {
+          if (!ro.container.destroyed) {
+            ro.graphic.visible = true;
+            this._drawShape(ro.graphic, sr);
+          }
+        });
+      }
+    } else {
+      if (ro.spriteNode) { ro.spriteNode.destroy(); ro.spriteNode = null; }
+      ro.graphic.visible = true;
+      this._drawShape(ro.graphic, sr);
+    }
+  }
+
+  private _createRenderObject(entityId: string): SpriteRenderObject {
+    const container = new Container();
+    const graphic   = new Graphics();
+    container.addChild(graphic);
+    graphic.visible = true;
+    return { entityId, container, graphic, spriteNode: null, lastColor: '', lastShape: '', lastSize: -1, lastTextureUrl: '__UNSET__' as unknown as null };
+  }
+
+  private _drawShape(g: Graphics, sr: SpriteRendererComponent): void {
+    const color = this._hexToPixi(sr.color);
+    const half  = sr.size / 2;
+    const sw    = 1.5 / (this._worldRoot?.scale.x ?? 1);
+    g.clear();
+    switch (sr.shape) {
+      case 'square':
+        g.rect(-half, -half, sr.size, sr.size);
+        g.fill({ color, alpha: 1 });
+        g.rect(-half, -half, sr.size, sr.size);
+        g.stroke({ width: sw, color: 0xffffff, alpha: 0.5 });
+        break;
+      case 'capsule': {
+        const r = half * 0.45;
+        g.roundRect(-r, -half, r * 2, sr.size, r);
+        g.fill({ color, alpha: 1 });
+        g.roundRect(-r, -half, r * 2, sr.size, r);
+        g.stroke({ width: sw, color: 0xffffff, alpha: 0.5 });
+        break;
+      }
+      case 'triangle':
+        g.moveTo(0, -half); g.lineTo(half, half); g.lineTo(-half, half); g.closePath();
+        g.fill({ color, alpha: 1 });
+        g.moveTo(0, -half); g.lineTo(half, half); g.lineTo(-half, half); g.closePath();
+        g.stroke({ width: sw, color: 0xffffff, alpha: 0.5 });
+        break;
+      default:
+        g.rect(-half, -half, sr.size, sr.size);
+        g.fill({ color, alpha: 1 });
+        g.rect(-half, -half, sr.size, sr.size);
+        g.stroke({ width: sw, color: 0xffffff, alpha: 0.5 });
+        break;
+    }
+  }
+
+  // ── Gizmos ───────────────────────────────────────────────────────────────
+
+  /**
+   * Draw all editor gizmos (selection outline + tool handles + light icons).
+   *
+   * CRITICAL PixiJS v8 rule: fill() accumulates ALL shapes added since the
+   * last clear(). Every shape must be IMMEDIATELY followed by its own
+   * stroke() or fill().  Rule: shape → fill/stroke → shape → fill/stroke.
+   */
+  private _drawGizmos(scene: Scene): void {
+    if (!this._gizmoG || !this._cameraGizmoG || !this._worldRoot) return;
+
+    this._gizmoG.clear();
+    this._cameraGizmoG.clear();
+
+    // Light gizmos drawn into _cameraGizmoG so their draw state is isolated.
+    this._drawLightGizmos(scene);
+
+    if (!this._selectedId) return;
+
+    const entity = scene.getEntity(this._selectedId);
+    if (!entity) return;
+
+    const tf = entity.getComponent('Transform');
+    if (!tf) return;
+
+    const sr        = entity.getComponent('SpriteRenderer');
+    const worldHalf = (sr?.size ?? 50) / 2;
+
+    const zoom = this._worldRoot.scale.x;
+    const ox   = this._worldRoot.x;
+    const oy   = this._worldRoot.y;
+    const sx   = ox + tf.position.x * zoom;
+    const sy   = oy + tf.position.y * zoom;
+
+    const rawHalf    = worldHalf * zoom * Math.max(Math.abs(tf.scale.x), Math.abs(tf.scale.y));
+    const screenHalf = Math.max(rawHalf, 20);
+
+    const g    = this._gizmoG;
+    // ARROW must always extend beyond the selection outline.
+    const ARROW = Math.max(70, screenHalf + 24);
+    const HEAD  = 10;
+
+    // Selection outline
+    g.rect(sx - screenHalf - 4, sy - screenHalf - 4, (screenHalf + 4) * 2, (screenHalf + 4) * 2);
+    g.stroke({ width: 1.5, color: 0x3a72b0, alpha: 1 });
+
+    if (this._activeTool === 'translate') {
+      g.moveTo(sx, sy); g.lineTo(sx + ARROW, sy);
+      g.stroke({ width: 2.5, color: 0xff3b30, alpha: 1 });
+      g.poly([sx + ARROW, sy - 5, sx + ARROW + HEAD, sy, sx + ARROW, sy + 5]);
+      g.fill({ color: 0xff3b30, alpha: 1 });
+      g.moveTo(sx, sy); g.lineTo(sx, sy - ARROW);
+      g.stroke({ width: 2.5, color: 0x34c759, alpha: 1 });
+      g.poly([sx - 5, sy - ARROW, sx, sy - ARROW - HEAD, sx + 5, sy - ARROW]);
+      g.fill({ color: 0x34c759, alpha: 1 });
+      g.rect(sx - 4, sy - 4, 8, 8);
+      g.fill({ color: 0x3a72b0, alpha: 1 });
+
+    } else if (this._activeTool === 'rotate') {
+      const RADIUS = Math.max(Math.min(screenHalf + 20, 120), 44);
+      g.moveTo(sx + RADIUS, sy);
+      g.arc(sx, sy, RADIUS, 0, Math.PI * 2);
+      g.stroke({ width: 2, color: 0xe07b39, alpha: 1 });
+      const entityRot = tf.rotationRadians;
+      for (let a = 0; a < 360; a += 45) {
+        const rad   = (a * Math.PI / 180) + entityRot;
+        const inner = RADIUS - 6;
+        g.moveTo(sx + Math.cos(rad) * inner,        sy + Math.sin(rad) * inner);
+        g.lineTo(sx + Math.cos(rad) * (RADIUS + 4), sy + Math.sin(rad) * (RADIUS + 4));
+        g.stroke({ width: 1.5, color: 0xe07b39, alpha: 0.8 });
+      }
+      g.moveTo(sx + 4, sy);
+      g.arc(sx, sy, 4, 0, Math.PI * 2);
+      g.stroke({ width: 3, color: 0xe07b39, alpha: 1 });
+
+    } else if (this._activeTool === 'scale') {
+      g.moveTo(sx, sy); g.lineTo(sx + ARROW, sy);
+      g.stroke({ width: 2, color: 0xff3b30, alpha: 1 });
+      g.rect(sx + ARROW - 6, sy - 6, 12, 12);
+      g.fill({ color: 0xff3b30, alpha: 1 });
+      g.moveTo(sx, sy); g.lineTo(sx, sy - ARROW);
+      g.stroke({ width: 2, color: 0x34c759, alpha: 1 });
+      g.rect(sx - 6, sy - ARROW - 6, 12, 12);
+      g.fill({ color: 0x34c759, alpha: 1 });
+      g.rect(sx - 5, sy - 5, 10, 10);
+      g.fill({ color: 0xffffff, alpha: 0.9 });
+    }
+
+    // Camera icon
+    if (entity.hasComponent('Camera2D')) {
+      const cg = this._cameraGizmoG;
+      cg.rect(sx - 30, sy - 18, 60, 36);
+      cg.stroke({ width: 2, color: 0xffc107, alpha: 1 });
+      cg.moveTo(sx + 30, sy - 10); cg.lineTo(sx + 46, sy - 16);
+      cg.lineTo(sx + 46, sy + 16); cg.lineTo(sx + 30, sy + 10);
+      cg.closePath();
+      cg.stroke({ width: 1.5, color: 0xffc107, alpha: 0.8 });
+      cg.moveTo(sx + 3, sy);
+      cg.arc(sx, sy, 3, 0, Math.PI * 2);
+      cg.stroke({ width: 2, color: 0xffc107, alpha: 1 });
+    }
+  }
+
+  /**
+   * Draw editor gizmo icons for every Light2D entity in the scene.
+   *
+   * Each light type gets a distinct icon that matches its behaviour:
+   *   Global  → sun with rays (ambient / covers everything)
+   *   Point   → dot + range ring (omnidirectional local)
+   *   Spot    → cone wedge (directional cone)
+   *   Freeform→ diamond + soft outer ring (area light)
+   *
+   * All drawn stroke-only in the light's own colour so they never occlude
+   * sprites.  Selected light gets full alpha + an extra highlight ring.
+   * The range ring is drawn in WORLD SPACE coords converted to screen,
+   * so it matches the actual lighting effect radius visually.
+   */
+  private _drawLightGizmos(scene: Scene): void {
+    if (!this._cameraGizmoG || !this._worldRoot) return;
+    const zoom = this._worldRoot.scale.x;
+    const ox   = this._worldRoot.x;
+    const oy   = this._worldRoot.y;
+    const g    = this._cameraGizmoG;
+
+    const lightEntities = scene.query('Light2D');
+    for (const entity of lightEntities) {
+      const tf = entity.getComponent('Transform');
+      if (!tf) continue;
+      const light = entity.getComponent('Light2D') as Light2DComponent | null;
+      if (!light) continue;
+
+      const sx           = ox + tf.position.x * zoom;
+      const sy           = oy + tf.position.y * zoom;
+      const isSelected   = entity.id === this._selectedId;
+      const lightColorNum = parseInt(light.color.replace('#', ''), 16);
+      const alpha         = isSelected ? 1 : 0.65;
+
+      switch (light.lightType) {
+
+        case 'global': {
+          // Sun icon: outer ring + 8 rays
+          g.moveTo(sx + 13, sy);
+          g.arc(sx, sy, 13, 0, Math.PI * 2);
+          g.stroke({ width: isSelected ? 2.5 : 1.5, color: lightColorNum, alpha });
+          for (let i = 0; i < 8; i++) {
+            const rad = (i * Math.PI) / 4;
+            g.moveTo(sx + Math.cos(rad) * 16, sy + Math.sin(rad) * 16);
+            g.lineTo(sx + Math.cos(rad) * 26, sy + Math.sin(rad) * 26);
+            g.stroke({ width: 1.5, color: lightColorNum, alpha });
+          }
+          // When selected: show "covers everything" label ring at large radius
+          if (isSelected) {
+            g.moveTo(sx + 40, sy);
+            g.arc(sx, sy, 40, 0, Math.PI * 2);
+            g.stroke({ width: 1, color: lightColorNum, alpha: 0.3 });
+          }
+          break;
         }
 
-
-        // --- Splash Screen & Initialization ---
-
-        /**
-         * Handles the splash screen animation and transition.
-         */
-        function startSplashScreen() {
-            let progress = 0;
-            const duration = 2000; // 2 seconds splash duration
-            const intervalTime = 50; // Update every 50ms
-            const steps = duration / intervalTime;
-            let currentStep = 0;
-
-            splashInterval = setInterval(() => {
-                currentStep++;
-                progress = Math.min(100, (currentStep / steps) * 100);
-                splashProgressBar.style.width = `${progress}%`;
-
-                if (progress >= 100) {
-                    clearInterval(splashInterval);
-                    
-                    loadingScreen.style.opacity = '0';
-                    
-                    setTimeout(() => {
-                        loadingScreen.style.display = 'none';
-                        mainContent.style.opacity = '1';
-                        mainContent.classList.remove('opacity-0');
-                    }, 500);
-                }
-            }, intervalTime);
+        case 'point': {
+          // Centre dot + range ring showing actual light radius in world space
+          const screenRange = light.range * zoom;
+          g.moveTo(sx + 5, sy);
+          g.arc(sx, sy, 5, 0, Math.PI * 2);
+          g.stroke({ width: 2, color: lightColorNum, alpha });
+          // Inner falloff ring at 50% radius
+          g.moveTo(sx + screenRange * 0.5, sy);
+          g.arc(sx, sy, screenRange * 0.5, 0, Math.PI * 2);
+          g.stroke({ width: 1, color: lightColorNum, alpha: alpha * 0.5 });
+          // Outer range ring (true radius)
+          g.moveTo(sx + screenRange, sy);
+          g.arc(sx, sy, screenRange, 0, Math.PI * 2);
+          g.stroke({ width: isSelected ? 2 : 1.5, color: lightColorNum, alpha });
+          // Cross-hair lines when selected
+          if (isSelected) {
+            g.moveTo(sx - screenRange, sy); g.lineTo(sx + screenRange, sy);
+            g.stroke({ width: 0.5, color: lightColorNum, alpha: 0.25 });
+            g.moveTo(sx, sy - screenRange); g.lineTo(sx, sy + screenRange);
+            g.stroke({ width: 0.5, color: lightColorNum, alpha: 0.25 });
+          }
+          break;
         }
 
-        // Start the splash screen and set initial mode when the document content is fully loaded
-        window.onload = function() {
-            startSplashScreen();
-            setMode('T2I');
-        };
+        case 'spot': {
+          // Cone gizmo: source dot + two edge rays + outer arc
+          const screenRange = light.range * zoom;
+          const halfOuter   = (light.outerAngle * Math.PI) / 360;
+          const halfInner   = (light.innerAngle * Math.PI) / 360;
+          const dir         = tf.rotationRadians - Math.PI / 2;
 
-    </script>
-</body>
-</html>
+          // Source dot
+          g.moveTo(sx + 5, sy);
+          g.arc(sx, sy, 5, 0, Math.PI * 2);
+          g.stroke({ width: 2, color: lightColorNum, alpha });
 
+          // Outer cone edges
+          g.moveTo(sx, sy);
+          g.lineTo(sx + Math.cos(dir - halfOuter) * screenRange,
+                   sy + Math.sin(dir - halfOuter) * screenRange);
+          g.stroke({ width: isSelected ? 2 : 1.5, color: lightColorNum, alpha });
 
+          g.moveTo(sx, sy);
+          g.lineTo(sx + Math.cos(dir + halfOuter) * screenRange,
+                   sy + Math.sin(dir + halfOuter) * screenRange);
+          g.stroke({ width: isSelected ? 2 : 1.5, color: lightColorNum, alpha });
 
+          // Outer arc
+          g.arc(sx, sy, screenRange, dir - halfOuter, dir + halfOuter);
+          g.stroke({ width: isSelected ? 1.5 : 1, color: lightColorNum, alpha });
+
+          // Inner cone (softer, shows the penumbra boundary)
+          if (halfInner > 0 && halfInner < halfOuter) {
+            g.moveTo(sx, sy);
+            g.lineTo(sx + Math.cos(dir - halfInner) * screenRange * 0.8,
+                     sy + Math.sin(dir - halfInner) * screenRange * 0.8);
+            g.stroke({ width: 1, color: lightColorNum, alpha: alpha * 0.4 });
+            g.moveTo(sx, sy);
+            g.lineTo(sx + Math.cos(dir + halfInner) * screenRange * 0.8,
+                     sy + Math.sin(dir + halfInner) * screenRange * 0.8);
+            g.stroke({ width: 1, color: lightColorNum, alpha: alpha * 0.4 });
+          }
+          break;
+        }
+
+        case 'freeform': {
+          // Diamond icon + soft outer range ring (area light feel)
+          const screenRange = light.range * zoom * 1.5;
+          // Diamond
+          g.moveTo(sx,      sy - 14);
+          g.lineTo(sx + 11, sy);
+          g.lineTo(sx,      sy + 14);
+          g.lineTo(sx - 11, sy);
+          g.closePath();
+          g.stroke({ width: isSelected ? 2.5 : 2, color: lightColorNum, alpha });
+          // Inner soft ring
+          g.moveTo(sx + screenRange * 0.5, sy);
+          g.arc(sx, sy, screenRange * 0.5, 0, Math.PI * 2);
+          g.stroke({ width: 1, color: lightColorNum, alpha: alpha * 0.4 });
+          // Outer range ring
+          g.moveTo(sx + screenRange, sy);
+          g.arc(sx, sy, screenRange, 0, Math.PI * 2);
+          g.stroke({ width: isSelected ? 1.5 : 1, color: lightColorNum, alpha: alpha * 0.6 });
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * Camera Bounds Gizmo (editor only) — screen space.
+   */
+  private _drawCameraBounds(scene: Scene): void {
+    if (!this._cameraBoundsG || !this._cameraBoundsOverlayG || !this._cameraBoundsLabel) return;
+    if (!this._app || !this._worldRoot) return;
+
+    this._cameraBoundsOverlayG.clear();
+    this._cameraBoundsG.clear();
+
+    const camEntity = scene.query('Camera2D', 'Transform')[0];
+    if (!camEntity) {
+      this._cameraBoundsLabel.text = '';
+      return;
+    }
+
+    const cam    = camEntity.getComponent('Camera2D')!;
+    const tf     = camEntity.getComponent('Transform')!;
+    const { w: panelW, h: panelH } = this._logicalSize();
+
+    const editorZoom = this._worldRoot.scale.x;
+    const originX = this._worldRoot.x + tf.position.x * editorZoom;
+    const originY = this._worldRoot.y + tf.position.y * editorZoom;
+
+    const refW = this._renderMode === 'fullscreen' ? panelW : this._resW;
+    const refH = this._renderMode === 'fullscreen' ? panelH : this._resH;
+
+    const gameZoom = cam.zoom || 1;
+    const boxW = (refW / gameZoom) * editorZoom;
+    const boxH = (refH / gameZoom) * editorZoom;
+    const screenX = originX - boxW / 2;
+    const screenY = originY - boxH / 2;
+
+    const ov    = this._cameraBoundsOverlayG;
+    const alpha = 0.35;
+    if (screenY > 0)
+      ov.rect(0, 0, panelW, screenY).fill({ color: 0x000000, alpha });
+    if (screenY + boxH < panelH)
+      ov.rect(0, screenY + boxH, panelW, panelH - (screenY + boxH)).fill({ color: 0x000000, alpha });
+    if (screenX > 0)
+      ov.rect(0, screenY, screenX, boxH).fill({ color: 0x000000, alpha });
+    if (screenX + boxW < panelW)
+      ov.rect(screenX + boxW, screenY, panelW - (screenX + boxW), boxH).fill({ color: 0x000000, alpha });
+
+    const g = this._cameraBoundsG;
+    this._dashedRect(g, screenX, screenY, boxW, boxH, 0x4ade80, 2, 1);
+
+    const CL = 12;
+    const corners: [number, number, boolean, boolean][] = [
+      [screenX,        screenY,        false, false],
+      [screenX + boxW, screenY,        true,  false],
+      [screenX,        screenY + boxH, false, true ],
+      [screenX + boxW, screenY + boxH, true,  true ],
+    ];
+    for (const [cx, cy, flipX, flipY] of corners) {
+      const dx = flipX ? -CL : CL;
+      const dy = flipY ? -CL : CL;
+      g.moveTo(cx + dx, cy); g.lineTo(cx, cy); g.lineTo(cx, cy + dy);
+      g.stroke({ width: 2, color: 0xffc107, alpha: 1 });
+    }
+
+    const labelW  = this._renderMode === 'fullscreen' ? Math.round(panelW) : this._resW;
+    const labelH  = this._renderMode === 'fullscreen' ? Math.round(panelH) : this._resH;
+    const modeStr = this._renderMode === 'fullscreen' ? ' (fullscreen)' : '';
+    this._cameraBoundsLabel.text = `${labelW}×${labelH}${modeStr}`;
+    this._cameraBoundsLabel.x    = screenX + 2;
+    this._cameraBoundsLabel.y    = Math.max(0, screenY - 16);
+  }
+
+  private _dashedRect(
+    g: Graphics,
+    x: number, y: number, w: number, h: number,
+    color: number, lineWidth: number, alpha: number,
+  ): void {
+    const dash = 8;
+    const gap  = 5;
+    const segments: [number, number, number, number][] = [
+      [x, y, x + w, y],
+      [x + w, y, x + w, y + h],
+      [x + w, y + h, x, y + h],
+      [x, y + h, x, y],
+    ];
+    for (const [x1, y1, x2, y2] of segments) {
+      const dx = x2 - x1, dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (len === 0) continue;
+      const ux = dx / len, uy = dy / len;
+      let traveled = 0, drawing = true;
+      while (traveled < len) {
+        const step = drawing ? dash : gap;
+        const next = Math.min(traveled + step, len);
+        if (drawing) {
+          g.moveTo(x1 + ux * traveled, y1 + uy * traveled);
+          g.lineTo(x1 + ux * next, y1 + uy * next);
+        }
+        traveled = next;
+        drawing = !drawing;
+      }
+    }
+    g.stroke({ width: lineWidth, color, alpha });
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
+  public canvasToWorld(canvasX: number, canvasY: number): { x: number; y: number } {
+    if (!this._worldRoot || !this._app) return { x: canvasX, y: canvasY };
+    const zoom = this._worldRoot.scale.x;
+    const ox   = this._worldRoot.x;
+    const oy   = this._worldRoot.y;
+    return { x: (canvasX - ox) / zoom, y: (canvasY - oy) / zoom };
+  }
+
+  public pickEntity(canvasX: number, canvasY: number, scene: Scene): string | null {
+    const world = this.canvasToWorld(canvasX, canvasY);
+    const entities = scene.query('Transform', 'SpriteRenderer');
+    for (let i = entities.length - 1; i >= 0; i--) {
+      const entity = entities[i]!;
+      const tf = entity.getComponent('Transform')!;
+      const sr = entity.getComponent('SpriteRenderer')!;
+      const half = sr.size / 2;
+      const dx = world.x - tf.position.x;
+      const dy = world.y - tf.position.y;
+      const halfW = half * Math.abs(tf.scale.x);
+      const halfH = half * Math.abs(tf.scale.y);
+      if (Math.abs(dx) <= halfW && Math.abs(dy) <= halfH) return entity.id;
+    }
+    return null;
+  }
+
+  /** Parse '#rrggbb' → [r, g, b] in 0..1 range. */
+  private _hexToRGB01(hex: string): [number, number, number] {
+    const n = parseInt(hex.replace('#', ''), 16);
+    return [(n >> 16 & 0xff) / 255, (n >> 8 & 0xff) / 255, (n & 0xff) / 255];
+  }
+
+  /** Encode [r,g,b] (0..1) → 0xRRGGBB number. */
+  private _rgb01ToHex(r: number, g: number, b: number): number {
+    return ((Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255));
+  }
+
+  private _hexToPixi(hex: string): ColorSource {
+    return parseInt(hex.replace('#', '0x'), 16) as ColorSource;
+  }
+
+  public get isReady(): boolean { return this._isReady; }
+  public get app():    Application | null { return this._app; }
+}
